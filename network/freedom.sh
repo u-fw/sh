@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# freedom.sh v9.2-final
-# VLESS + REALITY 自动配置脚本：用户选择 Xray-core / sing-box；缺失则用官方脚本安装
+# freedom.sh v9.3-final
+# VLESS + REALITY 自动配置脚本
+# - 手动选择 Xray-core / sing-box
+# - 未安装所选内核时，可使用官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
-# - sing-box: sing-box generate reality-keypair / uuid / check
+# - sing-box: sing-box generate reality-keypair / generate uuid / generate rand --hex 8 / check
+# - 二维码默认不生成，最后按需生成，避免长链接导致 qrencode 报错
 
 set -Eeuo pipefail
 
@@ -14,7 +17,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.2-final"
+SCRIPT_VERSION="v9.3-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 
@@ -39,13 +42,31 @@ MLDSA_VERIFY=""
 MLDSA_LINK_PARAM=""
 BLOCK_CN="true"
 
-log() { echo -e "${CYAN}$*${NC}"; }
-success() { echo -e "${GREEN}$*${NC}"; }
-warn() { echo -e "${YELLOW}$*${NC}"; }
-fatal() { echo -e "${RED}$*${NC}" >&2; exit 1; }
+info() { echo -e "${CYAN}[INFO] $*${NC}"; }
+ok() { echo -e "${GREEN}[OK] $*${NC}"; }
+warn() { echo -e "${YELLOW}[WARN] $*${NC}"; }
+fatal() { echo -e "${RED}[ERROR] $*${NC}" >&2; exit 1; }
 
 need_root() {
-  [[ "$(id -u)" == "0" ]] || fatal "❌ 请用 root 运行：sudo bash $0"
+  [[ "$(id -u)" == "0" ]] || fatal "请使用 root 运行：sudo bash $0"
+}
+
+install_packages() {
+  local pkgs=("$@")
+  ((${#pkgs[@]} > 0)) || return 0
+
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}" >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "${pkgs[@]}" >/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "${pkgs[@]}" >/dev/null
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "${pkgs[@]}" >/dev/null
+  else
+    fatal "找不到支持的包管理器，请手动安装：${pkgs[*]}"
+  fi
 }
 
 install_base_deps() {
@@ -53,24 +74,10 @@ install_base_deps() {
   for c in curl jq openssl; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
-  command -v qrencode >/dev/null 2>&1 || missing+=("qrencode")
 
-  if ((${#missing[@]} == 0)); then
-    return 0
-  fi
-
-  log "📦 安装基础依赖：${missing[*]}"
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y >/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y "${missing[@]}" >/dev/null
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y "${missing[@]}" >/dev/null
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache "${missing[@]}" >/dev/null
-  else
-    fatal "❌ 找不到支持的包管理器，请手动安装：${missing[*]}"
+  if ((${#missing[@]} > 0)); then
+    info "安装基础依赖：${missing[*]}"
+    install_packages "${missing[@]}"
   fi
 }
 
@@ -180,16 +187,16 @@ get_public_ip() {
 }
 
 install_xray_official() {
-  log "⬇️ 使用 XTLS 官方 Xray-install 安装/更新 Xray-core..."
+  info "使用 XTLS 官方 Xray-install 安装/更新 Xray-core"
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-  command -v xray >/dev/null 2>&1 || fatal "❌ Xray 安装后仍未找到 xray 命令"
+  command -v xray >/dev/null 2>&1 || fatal "Xray 安装后仍未找到 xray 命令"
   systemctl enable xray >/dev/null 2>&1 || true
 }
 
 install_singbox_official() {
-  log "⬇️ 使用 sing-box 官方 install.sh 安装/更新 sing-box..."
+  info "使用 sing-box 官方 install.sh 安装/更新 sing-box"
   curl -fsSL https://sing-box.app/install.sh | sh
-  command -v sing-box >/dev/null 2>&1 || fatal "❌ sing-box 安装后仍未找到 sing-box 命令"
+  command -v sing-box >/dev/null 2>&1 || fatal "sing-box 安装后仍未找到 sing-box 命令"
   systemctl enable sing-box >/dev/null 2>&1 || true
 }
 
@@ -197,10 +204,10 @@ ensure_selected_kernel_installed() {
   case "$KERNEL" in
     xray)
       if ! command -v xray >/dev/null 2>&1; then
-        warn "⚠️ 未找到 xray。"
-        read -r -p "👉 是否使用 XTLS 官方脚本安装 Xray-core？[Y/n]: " ans
+        warn "未找到 xray。"
+        read -r -p "是否使用 XTLS 官方脚本安装 Xray-core？[Y/n]: " ans
         case "${ans:-Y}" in
-          n|N|no|NO) fatal "❌ 已取消安装，退出。" ;;
+          n|N|no|NO) fatal "已取消安装，退出。" ;;
           *) install_xray_official ;;
         esac
       fi
@@ -211,10 +218,10 @@ ensure_selected_kernel_installed() {
       ;;
     sing-box)
       if ! command -v sing-box >/dev/null 2>&1; then
-        warn "⚠️ 未找到 sing-box。"
-        read -r -p "👉 是否使用 sing-box 官方脚本安装 sing-box？[Y/n]: " ans
+        warn "未找到 sing-box。"
+        read -r -p "是否使用 sing-box 官方脚本安装 sing-box？[Y/n]: " ans
         case "${ans:-Y}" in
-          n|N|no|NO) fatal "❌ 已取消安装，退出。" ;;
+          n|N|no|NO) fatal "已取消安装，退出。" ;;
           *) install_singbox_official ;;
         esac
       fi
@@ -228,11 +235,12 @@ ensure_selected_kernel_installed() {
 }
 
 choose_kernel() {
-  echo -e "\n${CYAN}请选择要部署的内核：${NC}"
+  echo
+  echo "请选择要部署的内核："
   echo "1) Xray-core"
   echo "2) sing-box"
   while true; do
-    read -r -p "👉 内核选择 [1/2，默认 1]: " ksel
+    read -r -p "内核选择 [1/2，默认 1]: " ksel
     ksel="${ksel:-1}"
     case "$ksel" in
       1) KERNEL="xray"; break ;;
@@ -245,21 +253,21 @@ choose_kernel() {
 
 read_common_inputs() {
   clear || true
-  success "🚀 VLESS-REALITY 自动化构建 ${SCRIPT_VERSION}"
-  echo -e "${CYAN}当前内核：${KERNEL} (${BIN})${NC}"
+  ok "VLESS-REALITY 自动化构建 ${SCRIPT_VERSION}"
+  info "当前内核：${KERNEL} (${BIN})"
 
   while true; do
-    read -r -p "👉 监听端口 (默认 ${DEFAULT_PORT}): " PORT
+    read -r -p "监听端口 (默认 ${DEFAULT_PORT}): " PORT
     PORT="${PORT:-$DEFAULT_PORT}"
     valid_port "$PORT" && break
     warn "端口无效，请输入 1-65535。"
   done
 
-  read -r -p "👉 伪装域名/SNI (默认 ${DEFAULT_SNI}): " SNI
+  read -r -p "伪装域名/SNI (默认 ${DEFAULT_SNI}): " SNI
   SNI="$(sanitize_sni "${SNI:-$DEFAULT_SNI}")"
-  [[ -n "$SNI" ]] || fatal "❌ SNI 不能为空"
+  [[ -n "$SNI" ]] || fatal "SNI 不能为空"
 
-  read -r -p "👉 是否保留原脚本的 CN/private 阻断路由？[Y/n]: " block_ans
+  read -r -p "是否保留 CN/private 阻断路由？[Y/n]: " block_ans
   case "${block_ans:-Y}" in
     n|N|no|NO) BLOCK_CN="false" ;;
     *) BLOCK_CN="true" ;;
@@ -267,9 +275,9 @@ read_common_inputs() {
 
   SERVER_IP="$(get_public_ip)"
   if [[ -z "$SERVER_IP" ]]; then
-    read -r -p "👉 未能自动获取公网 IP，请手动输入服务器地址/IP: " SERVER_IP
+    read -r -p "未能自动获取公网 IP，请手动输入服务器地址/IP: " SERVER_IP
   fi
-  [[ -n "$SERVER_IP" ]] || fatal "❌ 服务器地址/IP 不能为空"
+  [[ -n "$SERVER_IP" ]] || fatal "服务器地址/IP 不能为空"
   SERVER_HOST_FOR_LINK="$(url_host "$SERVER_IP")"
 }
 
@@ -282,49 +290,54 @@ gen_uuid() {
 }
 
 gen_short_id() {
-  openssl rand -hex 8 | tr -d '[:space:]'
+  if [[ "$KERNEL" == "sing-box" ]]; then
+    "$BIN" generate rand --hex 8 2>/dev/null | tr -d '[:space:]' || openssl rand -hex 8 | tr -d '[:space:]'
+  else
+    openssl rand -hex 8 | tr -d '[:space:]'
+  fi
 }
 
 gen_reality_keys_xray() {
-  log "🔑 生成 Xray REALITY X25519 密钥..."
+  info "生成 Xray REALITY X25519 密钥"
   local out
-  out="$($BIN x25519 2>&1)" || { echo "$out"; fatal "❌ xray x25519 执行失败"; }
+  out="$($BIN x25519 2>&1)" || { echo "$out"; fatal "xray x25519 执行失败"; }
   echo "$out"
 
   REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
   REALITY_PUB="$(field_after_colon "$out" "Password|PublicKey|Public key|Public")"
 
-  # 兜底：新版 Xray 常见为 Password (PublicKey): xxx；如果 awk 仍然失败，用 grep/sed 再抓一次。
+  # 兜底：兼容 Password (PublicKey): xxx。
   if [[ -z "$REALITY_PUB" ]]; then
     REALITY_PUB="$(printf '%s\n' "$out" | grep -Ei '^\s*Password(\s*\([^)]*\))?\s*:' | head -n1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]\r\n\"' || true)"
   fi
 
-  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "❌ 未能提取 Xray PrivateKey"; }
-  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "❌ 未能提取 Xray Password/PublicKey，不能生成 pbk"; }
-  [[ "$REALITY_PRIV" != *Private* && "$REALITY_PRIV" != *Password* ]] || fatal "❌ Xray 私钥提取异常：$REALITY_PRIV"
-  log "✅ REALITY pbk：$REALITY_PUB"
+  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "未能提取 Xray PrivateKey"; }
+  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "未能提取 Xray Password/PublicKey，不能生成 pbk"; }
+  [[ "$REALITY_PRIV" != *Private* && "$REALITY_PRIV" != *Password* ]] || fatal "Xray 私钥提取异常：$REALITY_PRIV"
+  ok "REALITY pbk：$REALITY_PUB"
 }
 
 gen_reality_keys_singbox() {
-  log "🔑 生成 sing-box REALITY 密钥..."
+  info "生成 sing-box REALITY 密钥"
   local out
-  out="$($BIN generate reality-keypair 2>&1)" || { echo "$out"; fatal "❌ sing-box generate reality-keypair 执行失败"; }
+  out="$($BIN generate reality-keypair 2>&1)" || { echo "$out"; fatal "sing-box generate reality-keypair 执行失败"; }
   echo "$out"
 
   REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
   REALITY_PUB="$(field_after_colon "$out" "PublicKey|Public key|Public")"
 
-  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "❌ 未能提取 sing-box PrivateKey"; }
-  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "❌ 未能提取 sing-box PublicKey，不能生成 pbk"; }
-  log "✅ REALITY pbk：$REALITY_PUB"
+  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "未能提取 sing-box PrivateKey"; }
+  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "未能提取 sing-box PublicKey，不能生成 pbk"; }
+  ok "REALITY pbk：$REALITY_PUB"
 }
 
 gen_xray_vless_encryption() {
-  echo -e "\n${CYAN}Xray VLESS Encryption：${NC}"
+  echo
+  echo "Xray VLESS Encryption："
   echo "1) none，兼容性最好"
   echo "2) X25519，由 xray vlessenc 生成"
   echo "3) ML-KEM-768，由 xray vlessenc 生成"
-  read -r -p "👉 选择加密 [默认 3]: " enc_choice
+  read -r -p "选择加密 [默认 3]: " enc_choice
   enc_choice="${enc_choice:-3}"
 
   VLESS_DEC="none"
@@ -335,12 +348,14 @@ gen_xray_vless_encryption() {
   fi
 
   local out alg
-  out="$($BIN vlessenc 2>&1)" || { echo "$out"; fatal "❌ xray vlessenc 执行失败。当前 Xray 可能过旧，请升级。"; }
+  out="$($BIN vlessenc 2>&1)" || { echo "$out"; fatal "xray vlessenc 执行失败。当前 Xray 可能过旧，请升级。"; }
 
   if [[ "$enc_choice" == "2" ]]; then
     alg="X25519"
-  else
+  elif [[ "$enc_choice" == "3" ]]; then
     alg="ML-KEM-768"
+  else
+    fatal "加密选项无效，只能选择 1、2 或 3。"
   fi
 
   VLESS_DEC="$(extract_vlessenc_value "$out" "$alg" "decryption")"
@@ -348,34 +363,35 @@ gen_xray_vless_encryption() {
 
   [[ -n "$VLESS_DEC" && -n "$VLESS_ENC" ]] || {
     echo "$out"
-    fatal "❌ 未能从 xray vlessenc 输出中提取 ${alg} 的 decryption/encryption"
+    fatal "未能从 xray vlessenc 输出中提取 ${alg} 的 decryption/encryption"
   }
 }
 
 gen_xray_mldsa_optional() {
-  echo -e "\n${CYAN}REALITY ML-DSA-65 额外签名：${NC}"
-  warn "提示：开启后要求伪装目标证书链足够大；不确定时建议先关闭。"
-  read -r -p "👉 是否开启 ML-DSA-65？[y/N]: " ans
+  echo
+  echo "REALITY ML-DSA-65 额外签名："
+  warn "开启后分享链接会明显变长；部分客户端或二维码工具可能处理失败。不确定时建议关闭。"
+  read -r -p "是否开启 ML-DSA-65？[y/N]: " ans
   case "${ans:-N}" in
     y|Y|yes|YES) ;;
     *) return 0 ;;
   esac
 
   local out
-  out="$($BIN mldsa65 2>&1)" || { echo "$out"; fatal "❌ xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
+  out="$($BIN mldsa65 2>&1)" || { echo "$out"; fatal "xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
   echo "$out"
 
   MLDSA_SEED="$(field_after_colon "$out" "Seed")"
   MLDSA_VERIFY="$(printf '%s\n' "$out" | sed -n '/^[[:space:]]*Verify[[:space:]]*:/,$p' | sed '1s/^[^:]*:[[:space:]]*//' | tr -d '\n\r[:space:]')"
 
-  [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { echo "$out"; fatal "❌ 未能提取 mldsa65 Seed/Verify"; }
+  [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { echo "$out"; fatal "未能提取 mldsa65 Seed/Verify"; }
   MLDSA_LINK_PARAM="&pqv=${MLDSA_VERIFY}"
 }
 
 generate_assets() {
   UUID="$(gen_uuid | tr -d '[:space:]')"
   SHORT_ID="$(gen_short_id)"
-  [[ -n "$UUID" && -n "$SHORT_ID" ]] || fatal "❌ UUID 或 shortId 生成失败"
+  [[ -n "$UUID" && -n "$SHORT_ID" ]] || fatal "UUID 或 shortId 生成失败"
 
   if [[ "$KERNEL" == "xray" ]]; then
     gen_reality_keys_xray
@@ -536,29 +552,29 @@ write_singbox_config() {
 }
 
 validate_config() {
-  log "🧪 检查配置文件..."
-  jq empty "$CONFIG_PATH" || fatal "❌ JSON 语法错误：$CONFIG_PATH"
+  info "检查配置文件"
+  jq empty "$CONFIG_PATH" || fatal "JSON 语法错误：$CONFIG_PATH"
 
   if [[ "$KERNEL" == "xray" ]]; then
     if ! "$BIN" run -test -c "$CONFIG_PATH" >/tmp/freedom-xray-test.log 2>&1; then
       if ! "$BIN" -test -config "$CONFIG_PATH" >/tmp/freedom-xray-test.log 2>&1; then
         cat /tmp/freedom-xray-test.log >&2
-        fatal "❌ Xray 配置测试失败"
+        fatal "Xray 配置测试失败"
       fi
     fi
   else
     "$BIN" check -c "$CONFIG_PATH" >/tmp/freedom-singbox-check.log 2>&1 || {
       cat /tmp/freedom-singbox-check.log >&2
-      fatal "❌ sing-box 配置测试失败"
+      fatal "sing-box 配置测试失败"
     }
   fi
 }
 
 restart_service() {
-  log "🔁 重启服务：$SERVICE_NAME"
+  info "重启服务：$SERVICE_NAME"
 
   if ! systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${SERVICE_NAME}.service"; then
-    warn "⚠️ 没找到 systemd 服务 ${SERVICE_NAME}.service，仅已写入配置：$CONFIG_PATH"
+    warn "没找到 systemd 服务 ${SERVICE_NAME}.service，仅已写入配置：$CONFIG_PATH"
     return 0
   fi
 
@@ -566,7 +582,7 @@ restart_service() {
   sleep 2
   systemctl is-active --quiet "$SERVICE_NAME" || {
     journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
-    fatal "❌ ${SERVICE_NAME} 启动失败"
+    fatal "${SERVICE_NAME} 启动失败"
   }
 }
 
@@ -579,21 +595,40 @@ build_link() {
 print_result() {
   local link="$1"
   echo
-  success "🎉 构建完成"
-  echo -e "${CYAN}内核：${KERNEL}${NC}"
-  echo -e "${CYAN}配置：${CONFIG_PATH}${NC}"
-  echo -e "${CYAN}UUID：${UUID}${NC}"
-  echo -e "${CYAN}SNI：${SNI}${NC}"
-  echo -e "${CYAN}shortId：${SHORT_ID}${NC}"
-  echo -e "${CYAN}pbk：${REALITY_PUB}${NC}"
+  ok "构建完成"
+  info "内核：${KERNEL}"
+  info "配置：${CONFIG_PATH}"
+  info "UUID：${UUID}"
+  info "SNI：${SNI}"
+  info "shortId：${SHORT_ID}"
+  info "pbk：${REALITY_PUB}"
+  info "链接长度：${#link} 字符"
   echo
-  echo -e "${GREEN}${link}${NC}"
+  echo "$link"
   echo
-  if command -v qrencode >/dev/null 2>&1; then
-    qrencode -t ANSIUTF8 "$link" || true
-  else
-    warn "未安装 qrencode，跳过二维码输出。"
-  fi
+
+  read -r -p "是否生成二维码？长链接可能导致 qrencode 失败。[y/N]: " qr_ans
+  case "${qr_ans:-N}" in
+    y|Y|yes|YES)
+      if ! command -v qrencode >/dev/null 2>&1; then
+        warn "未安装 qrencode。"
+        read -r -p "是否现在安装 qrencode？[y/N]: " install_qr_ans
+        case "${install_qr_ans:-N}" in
+          y|Y|yes|YES)
+            install_packages qrencode
+            ;;
+          *) warn "跳过二维码输出。"; return 0 ;;
+        esac
+      fi
+
+      if ! qrencode -t ANSIUTF8 "$link"; then
+        warn "二维码生成失败。通常是链接过长造成的；复制上面的 vless:// 链接即可。"
+      fi
+      ;;
+    *)
+      info "已跳过二维码输出。"
+      ;;
+  esac
 }
 
 main() {
