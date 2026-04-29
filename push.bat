@@ -1,37 +1,35 @@
 @echo off
-:: 设置字符集为 UTF-8 防止中文乱码
-chcp 65001 >nul
-echo ==========================================
-echo    🚀 GitHub 极速一键推送脚本 (带代理)
-echo ==========================================
-
-:: 【关键】修改为你的客户端代理端口！
-:: v2rayN 默认是 10808，NekoBox 默认是 2080 / 2081，Clash 默认 7890
+setlocal
+:: Set Local Proxy Port (v2rayN: 10808, Clash: 7890)
 set PROXY_PORT=10808
 
+echo ==========================================
+echo    🚀 GitHub Fast Push Tool (Proxy Mode)
+echo ==========================================
+
+:: Inject Proxy Settings
 set HTTP_PROXY=http://127.0.0.1:%PROXY_PORT%
 set HTTPS_PROXY=http://127.0.0.1:%PROXY_PORT%
-echo 🌐 已临时挂载本地代理: http://127.0.0.1:%PROXY_PORT%
+echo [INFO] Using Proxy: http://127.0.0.1:%PROXY_PORT%
 echo ------------------------------------------
 
-:: 检查本地文件变动
+:: Check Git Status
 git status -s
 echo.
 
-:: 交互式输入提交说明
-set /p MSG="📝 请输入提交说明 (直接回车默认为 'Auto update'): "
-if "%MSG%"=="" set MSG=Auto update
+:: Get Commit Message
+set /p COMMIT_MSG="Enter commit message (Default: 'update'): "
+if "%COMMIT_MSG%"=="" set COMMIT_MSG=update
 
-:: 执行 Git 三步曲
-echo.
-echo 📦 正在打包暂存区...
+:: Git Execution
+echo [1/3] Adding files...
 git add .
-git commit -m "%MSG%"
-
-echo 🚀 正在通过代理全速推送到 GitHub...
+echo [2/3] Committing changes...
+git commit -m "%COMMIT_MSG%"
+echo [3/3] Pushing to GitHub...
 git push
 
 echo.
-echo ✅ 同步彻底完成！
+echo [DONE] Repository synced successfully!
 echo ==========================================
 pause
