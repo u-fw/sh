@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v9.5-final
+# freedom.sh v9.6-final
 # VLESS + REALITY 自动配置脚本
 # - 手动选择 Xray-core / sing-box
 # - 未安装所选内核时，可使用官方安装脚本安装
@@ -18,9 +18,10 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.5-final"
+SCRIPT_VERSION="v9.6-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
+DEFAULT_NODE_NAME="Premium-Node"
 
 KERNEL=""
 BIN=""
@@ -42,6 +43,7 @@ MLDSA_SEED=""
 MLDSA_VERIFY=""
 MLDSA_LINK_PARAM=""
 BLOCK_CN="true"
+NODE_NAME=""
 
 info() { echo -e "${CYAN}[INFO] $*${NC}"; }
 ok() { echo -e "${GREEN}[OK] $*${NC}"; }
@@ -170,6 +172,11 @@ extract_vlessenc_value() {
   '
 }
 
+url_encode() {
+  # URL encode for VLESS URI fragment/query values.
+  jq -rn --arg v "$1"  '$v|@uri'
+}
+
 url_host() {
   local h="$1"
   if [[ "$h" == *:* && "$h" != \[*\] ]]; then
@@ -267,6 +274,8 @@ read_common_inputs() {
   read -r -p "伪装域名/SNI (默认 ${DEFAULT_SNI}): " SNI
   SNI="$(sanitize_sni "${SNI:-$DEFAULT_SNI}")"
   [[ -n "$SNI" ]] || fatal "SNI 不能为空"
+  read -r -p "节点名称 (默认 ${DEFAULT_NODE_NAME}): " NODE_NAME
+  NODE_NAME="${NODE_NAME:-$DEFAULT_NODE_NAME}"
 
   BLOCK_CN="true"
   info "CN/private 阻断路由：已默认启用。"
@@ -598,8 +607,9 @@ restart_service() {
 }
 
 build_link() {
-  local link
-  link="vless://${UUID}@${SERVER_HOST_FOR_LINK}:${PORT}?type=tcp&security=reality&pbk=${REALITY_PUB}${MLDSA_LINK_PARAM}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision&encryption=${VLESS_ENC}#Premium-Node"
+  local link encoded_name
+  encoded_name="$(url_encode "$NODE_NAME")"
+  link="vless://${UUID}@${SERVER_HOST_FOR_LINK}:${PORT}?type=tcp&security=reality&pbk=${REALITY_PUB}${MLDSA_LINK_PARAM}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision&encryption=${VLESS_ENC}#${encoded_name}"
   echo "$link"
 }
 
@@ -612,6 +622,7 @@ print_result() {
   info "UUID：${UUID}"
   info "SNI：${SNI}"
   info "shortId：${SHORT_ID}"
+  info "节点名称：${NODE_NAME}"
   info "pbk：${REALITY_PUB}"
   info "CN/private 阻断路由：启用；geolocation-!cn 优先放行"
   info "链接长度：${#link} 字符"
