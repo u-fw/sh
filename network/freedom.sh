@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# freedom.sh v9.1-final
-# VLESS + REALITY 自动配置脚本：分别适配 Xray-core / sing-box
-# - Xray: 使用 xray x25519 / uuid / vlessenc / mldsa65 / run -test
-# - sing-box: 使用 sing-box generate reality-keypair / uuid / rand / check
+# freedom.sh v9.2-final
+# VLESS + REALITY 自动配置脚本：用户选择 Xray-core / sing-box；缺失则用官方脚本安装
+# - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
+# - sing-box: sing-box generate reality-keypair / uuid / check
 
 set -Eeuo pipefail
 
@@ -14,7 +14,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.1-final"
+SCRIPT_VERSION="v9.2-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 
@@ -48,9 +48,9 @@ need_root() {
   [[ "$(id -u)" == "0" ]] || fatal "❌ 请用 root 运行：sudo bash $0"
 }
 
-install_deps() {
+install_base_deps() {
   local missing=()
-  for c in jq curl openssl; do
+  for c in curl jq openssl; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
   command -v qrencode >/dev/null 2>&1 || missing+=("qrencode")
@@ -59,7 +59,7 @@ install_deps() {
     return 0
   fi
 
-  log "📦 安装依赖：${missing[*]}"
+  log "📦 安装基础依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null
@@ -95,48 +95,67 @@ sanitize_sni() {
 }
 
 field_after_colon() {
-  # 用法：field_after_colon "文本" "PrivateKey|Private"
-  # 兼容以下格式：
+  # 用法：field_after_colon "文本" "PrivateKey|Password|PublicKey"
+  # 兼容：
   #   PrivateKey: xxx
   #   Password (PublicKey): xxx
   #   PublicKey: xxx
-  # 注意：新版 Xray 的 x25519 输出常见为 Password (PublicKey)，不是单独的 PublicKey。
+  #   Private key: xxx
   local text="$1"
   local pattern="$2"
-  echo "$text" | awk -F':[[:space:]]*' -v pat="$pattern" '
-    BEGIN { IGNORECASE=1; n=split(pat, names, /\|/) }
-    {
-      key=$1
+  printf '%s\n' "$text" | awk -v pat="$pattern" '
+    BEGIN {
+      n = split(pat, names, /\|/)
+      for (i = 1; i <= n; i++) {
+        want[i] = tolower(names[i])
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", want[i])
+      }
+    }
+    index($0, ":") {
+      line = $0
+      key = line
+      sub(/:.*/, "", key)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
-      sub(/[[:space:]]*\(.*/, "", key)
-      for (i=1; i<=n; i++) {
-        if (tolower(key) == tolower(names[i])) {
-          val=$2
-          gsub(/[[:space:]\r\n\"]/, "", val)
-          print val
-          exit
+
+      key_no_paren = key
+      sub(/[[:space:]]*\(.*/, "", key_no_paren)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key_no_paren)
+
+      key_l = tolower(key)
+      key_np_l = tolower(key_no_paren)
+
+      val = line
+      sub(/^[^:]*:[[:space:]]*/, "", val)
+      gsub(/[[:space:]\r\n\"]/, "", val)
+
+      for (i = 1; i <= n; i++) {
+        if (key_l == want[i] || key_np_l == want[i] || index(key_l, want[i]) == 1) {
+          if (val != "") {
+            print val
+            exit
+          }
         }
       }
     }
   '
 }
-first_json_value_after_marker() {
-  # 用法：first_json_value_after_marker "文本" "Authentication: ML-KEM-768" "decryption"
-  # 兼容 xray vlessenc 当前的“分段文本 + JSON 字段”输出。
+
+extract_vlessenc_value() {
+  # 用法：extract_vlessenc_value "文本" "ML-KEM-768" "decryption"
   local text="$1"
-  local marker="$2"
+  local alg="$2"
   local key="$3"
-  echo "$text" | awk -v marker="$marker" -v key="$key" '
-    index($0, marker) { f=1; next }
-    f && $0 ~ "\"" key "\"[[:space:]]*:" {
-      line=$0
-      sub(".*\"" key "\"[[:space:]]*:[[:space:]]*\"", "", line)
+  printf '%s\n' "$text" | awk -v alg="$alg" -v key="$key" '
+    index($0, alg) { f = 1 }
+    f && $0 ~ "\\\"" key "\\\"[[:space:]]*:" {
+      line = $0
+      sub(".*\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\"", "", line)
       while (line !~ /\"/) {
         if ((getline more) <= 0) break
-        line=line more
+        line = line more
       }
-      sub("\".*", "", line)
-      gsub(/[[:space:]\r\n]/, "", line)
+      sub("\\\".*", "", line)
+      gsub(/[[:space:]\r\n,]/, "", line)
       print line
       exit
     }
@@ -160,44 +179,68 @@ get_public_ip() {
   echo "$ip"
 }
 
-choose_kernel() {
-  local has_xray="false"
-  local has_sing="false"
-  command -v xray >/dev/null 2>&1 && has_xray="true"
-  command -v sing-box >/dev/null 2>&1 && has_sing="true"
+install_xray_official() {
+  log "⬇️ 使用 XTLS 官方 Xray-install 安装/更新 Xray-core..."
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  command -v xray >/dev/null 2>&1 || fatal "❌ Xray 安装后仍未找到 xray 命令"
+  systemctl enable xray >/dev/null 2>&1 || true
+}
 
-  echo -e "\n${CYAN}请选择内核：${NC}"
-  echo "1) 自动检测"
-  echo "2) Xray-core"
-  echo "3) sing-box"
-  read -r -p "👉 内核选择 [默认 1]: " ksel
-  ksel="${ksel:-1}"
+install_singbox_official() {
+  log "⬇️ 使用 sing-box 官方 install.sh 安装/更新 sing-box..."
+  curl -fsSL https://sing-box.app/install.sh | sh
+  command -v sing-box >/dev/null 2>&1 || fatal "❌ sing-box 安装后仍未找到 sing-box 命令"
+  systemctl enable sing-box >/dev/null 2>&1 || true
+}
 
-  case "$ksel" in
-    2) [[ "$has_xray" == "true" ]] || fatal "❌ 未找到 xray 可执行文件"; KERNEL="xray" ;;
-    3) [[ "$has_sing" == "true" ]] || fatal "❌ 未找到 sing-box 可执行文件"; KERNEL="sing-box" ;;
-    1|*)
-      if [[ "$has_xray" == "true" ]]; then
-        KERNEL="xray"
-      elif [[ "$has_sing" == "true" ]]; then
-        KERNEL="sing-box"
-      else
-        fatal "❌ 未找到 xray 或 sing-box。请先安装其中一个内核。"
+ensure_selected_kernel_installed() {
+  case "$KERNEL" in
+    xray)
+      if ! command -v xray >/dev/null 2>&1; then
+        warn "⚠️ 未找到 xray。"
+        read -r -p "👉 是否使用 XTLS 官方脚本安装 Xray-core？[Y/n]: " ans
+        case "${ans:-Y}" in
+          n|N|no|NO) fatal "❌ 已取消安装，退出。" ;;
+          *) install_xray_official ;;
+        esac
       fi
+      BIN="$(command -v xray)"
+      SERVICE_NAME="xray"
+      CONFIG_DIR="/usr/local/etc/xray"
+      CONFIG_PATH="$CONFIG_DIR/config.json"
       ;;
+    sing-box)
+      if ! command -v sing-box >/dev/null 2>&1; then
+        warn "⚠️ 未找到 sing-box。"
+        read -r -p "👉 是否使用 sing-box 官方脚本安装 sing-box？[Y/n]: " ans
+        case "${ans:-Y}" in
+          n|N|no|NO) fatal "❌ 已取消安装，退出。" ;;
+          *) install_singbox_official ;;
+        esac
+      fi
+      BIN="$(command -v sing-box)"
+      SERVICE_NAME="sing-box"
+      CONFIG_DIR="/etc/sing-box"
+      CONFIG_PATH="$CONFIG_DIR/config.json"
+      ;;
+    *) fatal "内部错误：未知内核 $KERNEL" ;;
   esac
+}
 
-  if [[ "$KERNEL" == "xray" ]]; then
-    BIN="$(command -v xray)"
-    SERVICE_NAME="xray"
-    CONFIG_DIR="/usr/local/etc/xray"
-    CONFIG_PATH="$CONFIG_DIR/config.json"
-  else
-    BIN="$(command -v sing-box)"
-    SERVICE_NAME="sing-box"
-    CONFIG_DIR="/etc/sing-box"
-    CONFIG_PATH="$CONFIG_DIR/config.json"
-  fi
+choose_kernel() {
+  echo -e "\n${CYAN}请选择要部署的内核：${NC}"
+  echo "1) Xray-core"
+  echo "2) sing-box"
+  while true; do
+    read -r -p "👉 内核选择 [1/2，默认 1]: " ksel
+    ksel="${ksel:-1}"
+    case "$ksel" in
+      1) KERNEL="xray"; break ;;
+      2) KERNEL="sing-box"; break ;;
+      *) warn "请输入 1 或 2。" ;;
+    esac
+  done
+  ensure_selected_kernel_installed
 }
 
 read_common_inputs() {
@@ -239,45 +282,48 @@ gen_uuid() {
 }
 
 gen_short_id() {
-  local sid=""
-  if [[ "$KERNEL" == "sing-box" ]]; then
-    sid="$($BIN generate rand --hex 8 2>/dev/null || true)"
-  fi
-  [[ -n "$sid" ]] || sid="$(openssl rand -hex 8)"
-  echo "$sid" | tr -d '[:space:]'
+  openssl rand -hex 8 | tr -d '[:space:]'
 }
 
 gen_reality_keys_xray() {
   log "🔑 生成 Xray REALITY X25519 密钥..."
   local out
   out="$($BIN x25519 2>&1)" || { echo "$out"; fatal "❌ xray x25519 执行失败"; }
+  echo "$out"
 
-  REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private")"
-  # 新版 Xray 客户端侧字段叫 Password；部分旧输出/第三方构建可能仍显示 PublicKey/Public。
-  REALITY_PUB="$(field_after_colon "$out" "Password|PublicKey|Public")"
+  REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
+  REALITY_PUB="$(field_after_colon "$out" "Password|PublicKey|Public key|Public")"
+
+  # 兜底：新版 Xray 常见为 Password (PublicKey): xxx；如果 awk 仍然失败，用 grep/sed 再抓一次。
+  if [[ -z "$REALITY_PUB" ]]; then
+    REALITY_PUB="$(printf '%s\n' "$out" | grep -Ei '^\s*Password(\s*\([^)]*\))?\s*:' | head -n1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]\r\n\"' || true)"
+  fi
 
   [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "❌ 未能提取 Xray PrivateKey"; }
   [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "❌ 未能提取 Xray Password/PublicKey，不能生成 pbk"; }
   [[ "$REALITY_PRIV" != *Private* && "$REALITY_PRIV" != *Password* ]] || fatal "❌ Xray 私钥提取异常：$REALITY_PRIV"
+  log "✅ REALITY pbk：$REALITY_PUB"
 }
 
 gen_reality_keys_singbox() {
   log "🔑 生成 sing-box REALITY 密钥..."
   local out
   out="$($BIN generate reality-keypair 2>&1)" || { echo "$out"; fatal "❌ sing-box generate reality-keypair 执行失败"; }
+  echo "$out"
 
-  REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private")"
-  REALITY_PUB="$(field_after_colon "$out" "PublicKey|Public")"
+  REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
+  REALITY_PUB="$(field_after_colon "$out" "PublicKey|Public key|Public")"
 
   [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "❌ 未能提取 sing-box PrivateKey"; }
   [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "❌ 未能提取 sing-box PublicKey，不能生成 pbk"; }
+  log "✅ REALITY pbk：$REALITY_PUB"
 }
 
 gen_xray_vless_encryption() {
   echo -e "\n${CYAN}Xray VLESS Encryption：${NC}"
   echo "1) none，兼容性最好"
-  echo "2) X25519 认证，由 xray vlessenc 生成"
-  echo "3) ML-KEM-768 认证，由 xray vlessenc 生成，后量子认证"
+  echo "2) X25519，由 xray vlessenc 生成"
+  echo "3) ML-KEM-768，由 xray vlessenc 生成"
   read -r -p "👉 选择加密 [默认 3]: " enc_choice
   enc_choice="${enc_choice:-3}"
 
@@ -288,23 +334,21 @@ gen_xray_vless_encryption() {
     return 0
   fi
 
-  "$BIN" help 2>/dev/null | grep -q "vlessenc" || fatal "❌ 当前 Xray 不支持 vlessenc，请升级 Xray-core"
-
-  local out marker
-  out="$($BIN vlessenc 2>&1)" || { echo "$out"; fatal "❌ xray vlessenc 执行失败"; }
+  local out alg
+  out="$($BIN vlessenc 2>&1)" || { echo "$out"; fatal "❌ xray vlessenc 执行失败。当前 Xray 可能过旧，请升级。"; }
 
   if [[ "$enc_choice" == "2" ]]; then
-    marker="Authentication: X25519"
+    alg="X25519"
   else
-    marker="Authentication: ML-KEM-768"
+    alg="ML-KEM-768"
   fi
 
-  VLESS_DEC="$(first_json_value_after_marker "$out" "$marker" "decryption")"
-  VLESS_ENC="$(first_json_value_after_marker "$out" "$marker" "encryption")"
+  VLESS_DEC="$(extract_vlessenc_value "$out" "$alg" "decryption")"
+  VLESS_ENC="$(extract_vlessenc_value "$out" "$alg" "encryption")"
 
   [[ -n "$VLESS_DEC" && -n "$VLESS_ENC" ]] || {
     echo "$out"
-    fatal "❌ 未能从 xray vlessenc 输出中提取 decryption/encryption"
+    fatal "❌ 未能从 xray vlessenc 输出中提取 ${alg} 的 decryption/encryption"
   }
 }
 
@@ -317,15 +361,12 @@ gen_xray_mldsa_optional() {
     *) return 0 ;;
   esac
 
-  "$BIN" help 2>/dev/null | grep -q "mldsa65" || fatal "❌ 当前 Xray 不支持 mldsa65，请升级 Xray-core"
-
-  log "🧬 生成 Xray ML-DSA-65 Seed/Verify..."
   local out
-  out="$($BIN mldsa65 2>&1)" || { echo "$out"; fatal "❌ xray mldsa65 执行失败"; }
+  out="$($BIN mldsa65 2>&1)" || { echo "$out"; fatal "❌ xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
+  echo "$out"
 
   MLDSA_SEED="$(field_after_colon "$out" "Seed")"
-  # Verify 可能很长，保留从 Verify: 到结尾并拍平成一行。
-  MLDSA_VERIFY="$(echo "$out" | sed -n '/^[[:space:]]*Verify[[:space:]]*:/,$p' | sed '1s/^[^:]*:[[:space:]]*//' | tr -d '\n\r[:space:]')"
+  MLDSA_VERIFY="$(printf '%s\n' "$out" | sed -n '/^[[:space:]]*Verify[[:space:]]*:/,$p' | sed '1s/^[^:]*:[[:space:]]*//' | tr -d '\n\r[:space:]')"
 
   [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { echo "$out"; fatal "❌ 未能提取 mldsa65 Seed/Verify"; }
   MLDSA_LINK_PARAM="&pqv=${MLDSA_VERIFY}"
@@ -469,7 +510,6 @@ write_singbox_config() {
           tls: {
             enabled: true,
             server_name: $sni,
-            curve_preferences: ["X25519MLKEM768", "X25519"],
             reality: {
               enabled: true,
               handshake: { server: $sni, server_port: 443 },
@@ -545,6 +585,7 @@ print_result() {
   echo -e "${CYAN}UUID：${UUID}${NC}"
   echo -e "${CYAN}SNI：${SNI}${NC}"
   echo -e "${CYAN}shortId：${SHORT_ID}${NC}"
+  echo -e "${CYAN}pbk：${REALITY_PUB}${NC}"
   echo
   echo -e "${GREEN}${link}${NC}"
   echo
@@ -557,7 +598,7 @@ print_result() {
 
 main() {
   need_root
-  install_deps
+  install_base_deps
   sync_time_best_effort
   choose_kernel
   read_common_inputs
