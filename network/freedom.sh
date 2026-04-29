@@ -1,5 +1,5 @@
 #!/bin/bash
-# v8.1 终极进化版 - 支持 X25519 与 PQC 双重动态协议提取
+# v8.2 终极手术刀版 - 修复密钥提取逻辑冲突，确保私钥纯净
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -19,7 +19,7 @@ UUID=$(uuidgen)
 SHORT_ID=$(openssl rand -hex 8)
 
 clear
-echo -e "${GREEN}🚀 VLESS-REALITY-PQC 自动化构建 v8.1 (全动态匹配)${NC}"
+echo -e "${GREEN}🚀 VLESS-REALITY-PQC 自动化构建 v8.2 (手术刀版)${NC}"
 read -p "👉 监听端口 (默认 443): " PORT
 PORT=${PORT:-443}
 read -p "👉 伪装域名: " SNI
@@ -29,49 +29,49 @@ SNI=${SNI:-"v1-dy.ixigua.com"}
 XRAY_BIN=$(command -v xray)
 [ -z "$XRAY_BIN" ] && XRAY_BIN="/usr/local/bin/xray"
 
-# 3. 提取 REALITY 基础密钥对 (拍平处理，防止缩进干扰)
-X_KEYS=$($XRAY_BIN x25519 2>&1 | tr -d '\n\r')
-X_PRIV=$(echo "$X_KEYS" | sed 's/.*Private key: //g' | sed 's/Public key:.*//g' | tr -d '[:space:]')
-X_PUB=$(echo "$X_KEYS" | sed 's/.*Public key: //g' | tr -d '[:space:]')
+# 3. 【核心修正】提取 REALITY 基础密钥对
+echo -e "${CYAN}🔑 提取 REALITY 基础密钥...${NC}"
+X_OUT=$($XRAY_BIN x25519 2>&1)
+# 逻辑：找包含 Private 的行 -> 删掉冒号及以前的所有内容 -> 删掉所有空格
+X_PRIV=$(echo "$X_OUT" | grep -i "Private" | sed 's/.*:[[:space:]]*//' | tr -d '[:space:]')
+X_PUB=$(echo "$X_OUT" | grep -i "Public" | sed 's/.*:[[:space:]]*//' | tr -d '[:space:]')
 
-# 4. 加密协议选择
+# 4. 加密模式处理
 echo -e "\n1) None / 2) X25519 (经典动态) / 3) ML-KEM-768 (后量子动态)"
 read -p "选择加密 [默认 3]: " ENC_CHOICE
 ENC_CHOICE=${ENC_CHOICE:-3}
 
 V_SRV="none"; V_CLI="none"; PQC_JSON=""; M_VER_PARAM=""
-
-# 5. 核心逻辑：按块提取加密字符串
 V_OUT=$($XRAY_BIN vlessenc 2>&1)
 
 if [ "$ENC_CHOICE" == "3" ]; then
-    # 【后量子提取】
     echo -e "${CYAN}🧬 提取 ML-KEM-768 动态资产...${NC}"
-    V_SRV=$(echo "$V_OUT" | awk '/ML-KEM-768/{f=1} f&&/"decryption":/{print $2; exit}' | tr -d '",')
-    V_CLI=$(echo "$V_OUT" | awk '/ML-KEM-768/{f=1} f&&/"encryption":/{print $2; exit}' | tr -d '",')
+    # 精准切块提取加密字符串
+    V_SRV=$(echo "$V_OUT" | awk '/ML-KEM-768/{f=1} f&&/"decryption":/{print $2; exit}' | tr -d '",[:space:]')
+    V_CLI=$(echo "$V_OUT" | awk '/ML-KEM-768/{f=1} f&&/"encryption":/{print $2; exit}' | tr -d '",[:space:]')
     
-    # 提取超长 Verify
+    # 提取超长多行 Verify
     ML_RAW=$($XRAY_BIN mldsa65 2>&1)
-    M_SEED=$(echo "$ML_RAW" | grep "Seed:" | awk '{print $2}' | tr -d '[:space:]')
-    M_VER=$(echo "$ML_RAW" | sed -n '/Verify:/,$p' | sed 's/Verify: //' | tr -d '\n\r[:space:]')
+    M_SEED=$(echo "$ML_RAW" | grep -i "Seed" | sed 's/.*:[[:space:]]*//' | tr -d '[:space:]')
+    # 抓取从 Verify: 开始到结尾的所有内容，并拍平
+    M_VER=$(echo "$ML_RAW" | sed -n '/Verify:/,$p' | sed 's/Verify:[[:space:]]*//' | tr -d '\n\r[:space:]')
     
     PQC_JSON="\"mldsa65Seed\": \"$M_SEED\","
     M_VER_PARAM="&mldsa65Verify=$M_VER"
 
 elif [ "$ENC_CHOICE" == "2" ]; then
-    # 【X25519 动态提取】对应你 image_c19936.png 里的第一个块
     echo -e "${CYAN} klasik 提取 X25519 动态资产...${NC}"
-    V_SRV=$(echo "$V_OUT" | awk '/X25519/{f=1} f&&/"decryption":/{print $2; exit}' | tr -d '",')
-    V_CLI=$(echo "$V_OUT" | awk '/X25519/{f=1} f&&/"encryption":/{print $2; exit}' | tr -d '",')
+    V_SRV=$(echo "$V_OUT" | awk '/X25519/{f=1} f&&/"decryption":/{print $2; exit}' | tr -d '",[:space:]')
+    V_CLI=$(echo "$V_OUT" | awk '/X25519/{f=1} f&&/"encryption":/{print $2; exit}' | tr -d '",[:space:]')
 fi
 
-# 检查资产是否为空 (防止 Xray 没输出)
-if [ -z "$X_PRIV" ] || ([ "$ENC_CHOICE" -ne 1 ] && [ -z "$V_SRV" ]); then
-    echo -e "${RED}❌ 核心资产抓取失败！${NC}"
+# 🚨 防护检查：如果私钥里还带着标签词，说明提取还是失败了，强制拦截
+if [[ "$X_PRIV" == *"Private"* ]] || [ -z "$X_PRIV" ]; then
+    echo -e "${RED}❌ 密钥提取严重错误，请手动检查 xray x25519 输出格式。${NC}"
     exit 1
 fi
 
-# 6. 写入配置
+# 5. 写入配置
 cat << EOF > /usr/local/etc/xray/config.json
 {
   "log": { "loglevel": "warning" },
@@ -101,15 +101,15 @@ cat << EOF > /usr/local/etc/xray/config.json
 }
 EOF
 
-# 7. 重启服务
+# 6. 重启服务
 systemctl restart xray
 sleep 2
 
 if systemctl is-active xray &> /dev/null; then
-    LINK="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&pbk=${X_PUB}${M_VER_PARAM}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision&encryption=${V_CLI}#Node"
+    LINK="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&pbk=${X_PUB}${M_VER_PARAM}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&spx=%2F&flow=xtls-rprx-vision&encryption=${V_CLI}#Premium-Node"
     echo -e "\n${GREEN}🎉 构建成功！${NC}\n${CYAN}${LINK}${NC}\n"
     qrencode -t ANSIUTF8 "$LINK"
 else
-    echo -e "${RED}❌ 启动失败。${NC}"
+    echo -e "${RED}❌ 启动失败。配置有误。${NC}"
     $XRAY_BIN -test -config /usr/local/etc/xray/config.json
 fi
