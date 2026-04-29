@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v9.6-final
+# freedom.sh v9.8-final
 # VLESS + REALITY 自动配置脚本
 # - 手动选择 Xray-core / sing-box
 # - 未安装所选内核时，可使用官方安装脚本安装
@@ -7,6 +7,9 @@
 # - sing-box: sing-box generate reality-keypair / generate uuid / generate rand --hex 8 / check
 # - CN/private 阻断默认启用；Xray/sing-box 均采用 geolocation-!cn 优先放行，再阻断 CN/private
 # - 二维码默认不生成，最后按需生成，避免长链接导致 qrencode 报错
+# - 启动前检测端口占用；如果被另一内核占用，可交互停止对应服务
+# - 写入配置前自动备份；检查/启动失败时可交互恢复备份
+# - 隐藏服务端私钥等敏感输出；公网 IP 优先使用 api.ip.sb/ip
 
 set -Eeuo pipefail
 
@@ -18,7 +21,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.6-final"
+SCRIPT_VERSION="v9.8-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 DEFAULT_NODE_NAME="Premium-Node"
@@ -44,11 +47,78 @@ MLDSA_VERIFY=""
 MLDSA_LINK_PARAM=""
 BLOCK_CN="true"
 NODE_NAME=""
+BACKUP_FILE=""
 
 info() { echo -e "${CYAN}[INFO] $*${NC}"; }
 ok() { echo -e "${GREEN}[OK] $*${NC}"; }
 warn() { echo -e "${YELLOW}[WARN] $*${NC}"; }
 fatal() { echo -e "${RED}[ERROR] $*${NC}" >&2; exit 1; }
+
+ensure_systemd_available() {
+  command -v systemctl >/dev/null 2>&1 || fatal "未找到 systemctl；此脚本需要 systemd 管理 xray/sing-box 服务。"
+  if ! systemctl list-units --type=service >/dev/null 2>&1; then
+    fatal "当前环境无法使用 systemd。若在容器内运行，请改用支持 systemd 的 VPS/宿主机环境。"
+  fi
+}
+
+redact_sensitive_text() {
+  # 仅用于错误诊断输出，避免在终端直接暴露服务端私钥/种子。
+  sed -E \
+    -e 's/^([[:space:]]*(PrivateKey|Private key|Private)[^:]*:[[:space:]]*).*/\1<redacted>/I' \
+    -e 's/^([[:space:]]*(Seed)[^:]*:[[:space:]]*).*/\1<redacted>/I' \
+    -e 's/("decryption"[[:space:]]*:[[:space:]]*")[^"]+"/\1<redacted>"/I'
+}
+
+service_unit_exists() {
+  local svc="$1"
+  systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service" \
+    || systemctl list-units --all --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service"
+}
+
+print_service_diagnostics() {
+  local svc="$1"
+  warn "${svc}.service 状态："
+  systemctl status "$svc" --no-pager -l >&2 || true
+  warn "${svc}.service 最近日志："
+  journalctl -u "$svc" -n 80 --no-pager >&2 || true
+}
+
+restore_backup() {
+  [[ -n "${BACKUP_FILE:-}" && -f "$BACKUP_FILE" ]] || return 1
+  cp -a "$BACKUP_FILE" "$CONFIG_PATH"
+  chmod 644 "$CONFIG_PATH" 2>/dev/null || true
+  ok "已恢复备份配置：$BACKUP_FILE -> $CONFIG_PATH"
+
+  if service_unit_exists "$SERVICE_NAME"; then
+    info "尝试重启 ${SERVICE_NAME}.service 以恢复旧配置"
+    if systemctl restart "$SERVICE_NAME"; then
+      sleep 2
+      if systemctl is-active --quiet "$SERVICE_NAME"; then
+        ok "${SERVICE_NAME}.service 已恢复运行。"
+      else
+        warn "${SERVICE_NAME}.service 重启后仍未处于 active 状态。"
+        print_service_diagnostics "$SERVICE_NAME"
+      fi
+    else
+      warn "恢复备份后重启 ${SERVICE_NAME}.service 失败。"
+      print_service_diagnostics "$SERVICE_NAME"
+    fi
+  fi
+}
+
+fatal_with_rollback() {
+  local msg="$1"
+  local ans=""
+  if [[ -n "${BACKUP_FILE:-}" && -f "$BACKUP_FILE" ]]; then
+    warn "$msg"
+    read -r -p "是否恢复本次备份配置？[y/N]: " ans
+    case "${ans:-N}" in
+      y|Y|yes|YES) restore_backup || warn "恢复备份失败，请手动检查：$BACKUP_FILE" ;;
+      *) warn "已保留当前新配置。备份位置：$BACKUP_FILE" ;;
+    esac
+  fi
+  fatal "$msg"
+}
 
 need_root() {
   [[ "$(id -u)" == "0" ]] || fatal "请使用 root 运行：sudo bash $0"
@@ -188,10 +258,138 @@ url_host() {
 
 get_public_ip() {
   local ip=""
-  ip="$(curl -fsS4 --max-time 6 https://api.ipify.org 2>/dev/null || true)"
-  [[ -n "$ip" ]] || ip="$(curl -fsS4 --max-time 6 https://ifconfig.me 2>/dev/null || true)"
+  # 优先使用 ip.sb；失败时多源兜底。
+  for endpoint in \
+    "https://api.ip.sb/ip" \
+    "https://api.ipify.org" \
+    "https://ifconfig.me" \
+    "https://ipv4.icanhazip.com"; do
+    ip="$(curl -fsS4 --max-time 6 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$ip" ]] && break
+  done
   [[ -n "$ip" ]] || ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   echo "$ip"
+}
+
+port_listener_summary() {
+  # 输出当前 TCP LISTEN 占用者，格式尽量统一为：进程名 pid=PID 地址。
+  # 优先使用 ss；没有 ss 时兜底 lsof/netstat。
+  local port="$1"
+  local lines=""
+
+  if command -v ss >/dev/null 2>&1; then
+    lines="$(ss -H -ltnp "sport = :${port}" 2>/dev/null || true)"
+    if [[ -n "$lines" ]]; then
+      printf '%s\n' "$lines" | awk '
+        {
+          line = $0
+          found = 0
+          while (match(line, /"[^"]+",pid=[0-9]+/)) {
+            s = substr(line, RSTART, RLENGTH)
+            name = s
+            sub(/^"/, "", name)
+            sub(/",pid=.*/, "", name)
+            pid = s
+            sub(/.*pid=/, "", pid)
+            print name " pid=" pid
+            line = substr(line, RSTART + RLENGTH)
+            found = 1
+          }
+          if (!found) print "unknown " $0
+        }
+      ' | sort -u
+    fi
+    return 0
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $1 " pid=" $2 " " $9}' | sort -u
+    return 0
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {print $7 " " $4}' | sort -u
+    return 0
+  fi
+
+  return 1
+}
+
+service_exists() {
+  service_unit_exists "$1"
+}
+
+stop_service_and_recheck_port() {
+  local svc="$1"
+  local port="$2"
+  local after=""
+
+  if ! service_exists "$svc"; then
+    fatal "检测到端口可能被 ${svc} 占用，但未找到 ${svc}.service；请手动处理后重试。"
+  fi
+
+  systemctl stop "$svc"
+  sleep 1
+
+  after="$(port_listener_summary "$port" || true)"
+  if [[ -n "$after" ]]; then
+    warn "停止 ${svc}.service 后，端口 ${port} 仍被占用："
+    printf '%s\n' "$after" | sed 's/^/  - /'
+    fatal "端口 ${port} 仍未释放，请手动检查。"
+  fi
+
+  ok "已停止 ${svc}.service，端口 ${port} 已释放。"
+}
+
+check_port_available_or_handle() {
+  # 两个内核都走这里：选 xray 检查 xray 端口，选 sing-box 检查 sing-box 端口。
+  # 如果端口只被当前选择的服务占用，则允许继续，因为 systemctl restart 会重载本服务。
+  # 如果端口被另一内核占用，明确告知占用者，并询问是否停止对应服务。
+  local owners=""
+  local names=""
+  local non_current=""
+  local opposite=""
+  local ans=""
+
+  if ! owners="$(port_listener_summary "$PORT")"; then
+    warn "未找到 ss/lsof/netstat，跳过端口占用预检查。"
+    return 0
+  fi
+
+  [[ -z "$owners" ]] && return 0
+
+  warn "检测到 TCP 端口 ${PORT} 已被占用："
+  printf '%s\n' "$owners" | sed 's/^/  - /'
+
+  names="$(printf '%s\n' "$owners" | awk '{print $1}' | sed 's#^.*/##' | sort -u)"
+  non_current="$(printf '%s\n' "$names" | grep -vxF "$SERVICE_NAME" || true)"
+
+  if [[ -z "$non_current" ]]; then
+    warn "端口 ${PORT} 当前由本次选择的 ${SERVICE_NAME} 占用；后续重启会重载本服务，继续。"
+    return 0
+  fi
+
+  if [[ "$KERNEL" == "xray" ]] && printf '%s\n' "$names" | grep -qxF "sing-box"; then
+    opposite="sing-box"
+  elif [[ "$KERNEL" == "sing-box" ]] && printf '%s\n' "$names" | grep -qxF "xray"; then
+    opposite="xray"
+  fi
+
+  if [[ -n "$opposite" ]]; then
+    warn "你选择的是 ${KERNEL}，但端口 ${PORT} 被 ${opposite} 占用。"
+    read -r -p "是否停止 ${opposite}.service 释放端口 ${PORT}？[y/N]: " ans
+    case "${ans:-N}" in
+      y|Y|yes|YES)
+        stop_service_and_recheck_port "$opposite" "$PORT"
+        return 0
+        ;;
+      *)
+        fatal "端口 ${PORT} 未释放。请换端口，或手动停止 ${opposite}.service 后重试。"
+        ;;
+    esac
+  fi
+
+  fatal "端口 ${PORT} 被非当前服务占用。请换端口，或手动停止占用进程后重试。"
 }
 
 install_xray_official() {
@@ -307,8 +505,7 @@ gen_short_id() {
 gen_reality_keys_xray() {
   info "生成 Xray REALITY X25519 密钥"
   local out
-  out="$($BIN x25519 2>&1)" || { echo "$out"; fatal "xray x25519 执行失败"; }
-  echo "$out"
+  out="$($BIN x25519 2>&1)" || { printf '%s\n' "$out" | redact_sensitive_text; fatal "xray x25519 执行失败"; }
 
   REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
   REALITY_PUB="$(field_after_colon "$out" "Password|PublicKey|Public key|Public")"
@@ -318,23 +515,24 @@ gen_reality_keys_xray() {
     REALITY_PUB="$(printf '%s\n' "$out" | grep -Ei '^\s*Password(\s*\([^)]*\))?\s*:' | head -n1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]\r\n\"' || true)"
   fi
 
-  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "未能提取 Xray PrivateKey"; }
-  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "未能提取 Xray Password/PublicKey，不能生成 pbk"; }
-  [[ "$REALITY_PRIV" != *Private* && "$REALITY_PRIV" != *Password* ]] || fatal "Xray 私钥提取异常：$REALITY_PRIV"
+  [[ -n "$REALITY_PRIV" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 Xray PrivateKey"; }
+  [[ -n "$REALITY_PUB" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 Xray Password/PublicKey，不能生成 pbk"; }
+  [[ "$REALITY_PRIV" != *Private* && "$REALITY_PRIV" != *Password* ]] || fatal "Xray 私钥提取异常"
+  ok "REALITY private key generated."
   ok "REALITY pbk：$REALITY_PUB"
 }
 
 gen_reality_keys_singbox() {
   info "生成 sing-box REALITY 密钥"
   local out
-  out="$($BIN generate reality-keypair 2>&1)" || { echo "$out"; fatal "sing-box generate reality-keypair 执行失败"; }
-  echo "$out"
+  out="$($BIN generate reality-keypair 2>&1)" || { printf '%s\n' "$out" | redact_sensitive_text; fatal "sing-box generate reality-keypair 执行失败"; }
 
   REALITY_PRIV="$(field_after_colon "$out" "PrivateKey|Private key|Private")"
   REALITY_PUB="$(field_after_colon "$out" "PublicKey|Public key|Public")"
 
-  [[ -n "$REALITY_PRIV" ]] || { echo "$out"; fatal "未能提取 sing-box PrivateKey"; }
-  [[ -n "$REALITY_PUB" ]] || { echo "$out"; fatal "未能提取 sing-box PublicKey，不能生成 pbk"; }
+  [[ -n "$REALITY_PRIV" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 sing-box PrivateKey"; }
+  [[ -n "$REALITY_PUB" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 sing-box PublicKey，不能生成 pbk"; }
+  ok "REALITY private key generated."
   ok "REALITY pbk：$REALITY_PUB"
 }
 
@@ -355,7 +553,7 @@ gen_xray_vless_encryption() {
   fi
 
   local out alg
-  out="$($BIN vlessenc 2>&1)" || { echo "$out"; fatal "xray vlessenc 执行失败。当前 Xray 可能过旧，请升级。"; }
+  out="$($BIN vlessenc 2>&1)" || { printf '%s\n' "$out" | redact_sensitive_text; fatal "xray vlessenc 执行失败。当前 Xray 可能过旧，请升级。"; }
 
   if [[ "$enc_choice" == "2" ]]; then
     alg="X25519"
@@ -369,9 +567,10 @@ gen_xray_vless_encryption() {
   VLESS_ENC="$(extract_vlessenc_value "$out" "$alg" "encryption")"
 
   [[ -n "$VLESS_DEC" && -n "$VLESS_ENC" ]] || {
-    echo "$out"
+    printf '%s\n' "$out" | redact_sensitive_text
     fatal "未能从 xray vlessenc 输出中提取 ${alg} 的 decryption/encryption"
   }
+  ok "Xray VLESS Encryption：${alg}"
 }
 
 gen_xray_mldsa_optional() {
@@ -385,14 +584,14 @@ gen_xray_mldsa_optional() {
   esac
 
   local out
-  out="$($BIN mldsa65 2>&1)" || { echo "$out"; fatal "xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
-  echo "$out"
+  out="$($BIN mldsa65 2>&1)" || { printf '%s\n' "$out" | redact_sensitive_text; fatal "xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
 
   MLDSA_SEED="$(field_after_colon "$out" "Seed")"
   MLDSA_VERIFY="$(printf '%s\n' "$out" | sed -n '/^[[:space:]]*Verify[[:space:]]*:/,$p' | sed '1s/^[^:]*:[[:space:]]*//' | tr -d '\n\r[:space:]')"
 
-  [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { echo "$out"; fatal "未能提取 mldsa65 Seed/Verify"; }
+  [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 mldsa65 Seed/Verify"; }
   MLDSA_LINK_PARAM="&pqv=${MLDSA_VERIFY}"
+  ok "ML-DSA-65 已启用；Verify 长度：${#MLDSA_VERIFY}"
 }
 
 generate_assets() {
@@ -406,6 +605,7 @@ generate_assets() {
     gen_xray_mldsa_optional
   else
     gen_reality_keys_singbox
+    info "sing-box 使用标准 VLESS Reality Vision，已跳过 Xray vlessenc / ML-DSA 参数。"
     VLESS_DEC="none"
     VLESS_ENC="none"
     MLDSA_LINK_PARAM=""
@@ -414,10 +614,14 @@ generate_assets() {
 
 backup_existing_config() {
   install -d -m 755 "$CONFIG_DIR"
+  BACKUP_FILE=""
   if [[ -f "$CONFIG_PATH" ]]; then
-    local bak="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
-    cp -a "$CONFIG_PATH" "$bak"
-    warn "已备份旧配置：$bak"
+    BACKUP_FILE="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -a "$CONFIG_PATH" "$BACKUP_FILE"
+    warn "已备份旧配置：$BACKUP_FILE"
+
+    # 只保留最新 5 个备份，避免长期堆积。
+    ls -1t "${CONFIG_PATH}".bak.* 2>/dev/null | tail -n +6 | xargs -r rm -f || true
   fi
 }
 
@@ -573,19 +777,19 @@ write_singbox_config() {
 
 validate_config() {
   info "检查配置文件"
-  jq empty "$CONFIG_PATH" || fatal "JSON 语法错误：$CONFIG_PATH"
+  jq empty "$CONFIG_PATH" || fatal_with_rollback "JSON 语法错误：$CONFIG_PATH"
 
   if [[ "$KERNEL" == "xray" ]]; then
     if ! "$BIN" run -test -c "$CONFIG_PATH" >/tmp/freedom-xray-test.log 2>&1; then
       if ! "$BIN" -test -config "$CONFIG_PATH" >/tmp/freedom-xray-test.log 2>&1; then
         cat /tmp/freedom-xray-test.log >&2
-        fatal "Xray 配置测试失败"
+        fatal_with_rollback "Xray 配置测试失败"
       fi
     fi
   else
     "$BIN" check -c "$CONFIG_PATH" >/tmp/freedom-singbox-check.log 2>&1 || {
       cat /tmp/freedom-singbox-check.log >&2
-      fatal "sing-box 配置测试失败"
+      fatal_with_rollback "sing-box 配置测试失败"
     }
   fi
 }
@@ -593,17 +797,21 @@ validate_config() {
 restart_service() {
   info "重启服务：$SERVICE_NAME"
 
-  if ! systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${SERVICE_NAME}.service"; then
+  if ! service_unit_exists "$SERVICE_NAME"; then
     warn "没找到 systemd 服务 ${SERVICE_NAME}.service，仅已写入配置：$CONFIG_PATH"
     return 0
   fi
 
-  systemctl restart "$SERVICE_NAME"
+  if ! systemctl restart "$SERVICE_NAME"; then
+    print_service_diagnostics "$SERVICE_NAME"
+    fatal_with_rollback "${SERVICE_NAME} 重启命令执行失败"
+  fi
+
   sleep 2
-  systemctl is-active --quiet "$SERVICE_NAME" || {
-    journalctl -u "$SERVICE_NAME" -n 80 --no-pager >&2 || true
-    fatal "${SERVICE_NAME} 启动失败"
-  }
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    print_service_diagnostics "$SERVICE_NAME"
+    fatal_with_rollback "${SERVICE_NAME} 启动失败"
+  fi
 }
 
 build_link() {
@@ -656,10 +864,12 @@ print_result() {
 
 main() {
   need_root
+  ensure_systemd_available
   install_base_deps
   sync_time_best_effort
   choose_kernel
   read_common_inputs
+  check_port_available_or_handle
   generate_assets
   backup_existing_config
 
