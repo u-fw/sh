@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v9.0-final
+# freedom.sh v9.1-final
 # VLESS + REALITY 自动配置脚本：分别适配 Xray-core / sing-box
 # - Xray: 使用 xray x25519 / uuid / vlessenc / mldsa65 / run -test
 # - sing-box: 使用 sing-box generate reality-keypair / uuid / rand / check
@@ -14,7 +14,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.0-final"
+SCRIPT_VERSION="v9.1-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 
@@ -96,14 +96,30 @@ sanitize_sni() {
 
 field_after_colon() {
   # 用法：field_after_colon "文本" "PrivateKey|Private"
+  # 兼容以下格式：
+  #   PrivateKey: xxx
+  #   Password (PublicKey): xxx
+  #   PublicKey: xxx
+  # 注意：新版 Xray 的 x25519 输出常见为 Password (PublicKey)，不是单独的 PublicKey。
   local text="$1"
   local pattern="$2"
   echo "$text" | awk -F':[[:space:]]*' -v pat="$pattern" '
-    BEGIN { IGNORECASE=1 }
-    $1 ~ ("^(" pat ")$") { gsub(/[[:space:]\r\n\"]/, "", $2); print $2; exit }
+    BEGIN { IGNORECASE=1; n=split(pat, names, /\|/) }
+    {
+      key=$1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      sub(/[[:space:]]*\(.*/, "", key)
+      for (i=1; i<=n; i++) {
+        if (tolower(key) == tolower(names[i])) {
+          val=$2
+          gsub(/[[:space:]\r\n\"]/, "", val)
+          print val
+          exit
+        }
+      }
+    }
   '
 }
-
 first_json_value_after_marker() {
   # 用法：first_json_value_after_marker "文本" "Authentication: ML-KEM-768" "decryption"
   # 兼容 xray vlessenc 当前的“分段文本 + JSON 字段”输出。
