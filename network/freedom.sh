@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v9.8-final
+# freedom.sh v9.10-final
 # VLESS + REALITY 自动配置脚本
 # - 手动选择 Xray-core / sing-box
 # - 未安装所选内核时，可使用官方安装脚本安装
@@ -10,6 +10,8 @@
 # - 启动前检测端口占用；如果被另一内核占用，可交互停止对应服务
 # - 写入配置前自动备份；检查/启动失败时可交互恢复备份
 # - 隐藏服务端私钥等敏感输出；公网 IP 优先使用 api.ip.sb/ip
+# - 端口占用报错会明确显示进程名、PID 与监听地址
+# - ML-DSA pqv 链接参数做 URL 编码；自动补齐 ss/iproute2 端口检测依赖
 
 set -Eeuo pipefail
 
@@ -21,7 +23,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.8-final"
+SCRIPT_VERSION="v9.10-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 DEFAULT_NODE_NAME="Premium-Node"
@@ -142,6 +144,31 @@ install_packages() {
   fi
 }
 
+install_port_detection_dep() {
+  # 端口占用检测优先依赖 ss。极简系统可能没有 ss，这里按发行版补齐。
+  command -v ss >/dev/null 2>&1 && return 0
+  command -v lsof >/dev/null 2>&1 && return 0
+  command -v netstat >/dev/null 2>&1 && return 0
+
+  info "安装端口检测依赖：ss"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y iproute >/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y iproute >/dev/null
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache iproute2 >/dev/null
+  else
+    warn "找不到支持的包管理器，无法自动安装 ss；端口检测将尽力使用已有工具。"
+  fi
+
+  if ! command -v ss >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+    warn "未找到 ss/lsof/netstat，端口占用预检查可能无法执行。"
+  fi
+}
+
 install_base_deps() {
   local missing=()
   for c in curl jq openssl; do
@@ -152,6 +179,8 @@ install_base_deps() {
     info "安装基础依赖：${missing[*]}"
     install_packages "${missing[@]}"
   fi
+
+  install_port_detection_dep
 }
 
 sync_time_best_effort() {
@@ -291,7 +320,7 @@ port_listener_summary() {
             sub(/",pid=.*/, "", name)
             pid = s
             sub(/.*pid=/, "", pid)
-            print name " pid=" pid
+            print name " pid=" pid " listen=" $4
             line = substr(line, RSTART + RLENGTH)
             found = 1
           }
@@ -389,7 +418,9 @@ check_port_available_or_handle() {
     esac
   fi
 
-  fatal "端口 ${PORT} 被非当前服务占用。请换端口，或手动停止占用进程后重试。"
+  local owner_oneline=""
+  owner_oneline="$(printf '%s\n' "$owners" | awk 'BEGIN{first=1} { if (!first) printf "; "; printf "%s", $0; first=0 }')"
+  fatal "端口 ${PORT} 被非当前服务占用：${owner_oneline}。请换端口，或手动停止占用进程后重试。"
 }
 
 install_xray_official() {
@@ -590,7 +621,7 @@ gen_xray_mldsa_optional() {
   MLDSA_VERIFY="$(printf '%s\n' "$out" | sed -n '/^[[:space:]]*Verify[[:space:]]*:/,$p' | sed '1s/^[^:]*:[[:space:]]*//' | tr -d '\n\r[:space:]')"
 
   [[ -n "$MLDSA_SEED" && -n "$MLDSA_VERIFY" ]] || { printf '%s\n' "$out" | redact_sensitive_text; fatal "未能提取 mldsa65 Seed/Verify"; }
-  MLDSA_LINK_PARAM="&pqv=${MLDSA_VERIFY}"
+  MLDSA_LINK_PARAM="&pqv=$(url_encode "$MLDSA_VERIFY")"
   ok "ML-DSA-65 已启用；Verify 长度：${#MLDSA_VERIFY}"
 }
 
