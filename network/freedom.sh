@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# freedom.sh v9.3-final
+# freedom.sh v9.5-final
 # VLESS + REALITY 自动配置脚本
 # - 手动选择 Xray-core / sing-box
 # - 未安装所选内核时，可使用官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
 # - sing-box: sing-box generate reality-keypair / generate uuid / generate rand --hex 8 / check
+# - CN/private 阻断默认启用；Xray/sing-box 均采用 geolocation-!cn 优先放行，再阻断 CN/private
 # - 二维码默认不生成，最后按需生成，避免长链接导致 qrencode 报错
 
 set -Eeuo pipefail
@@ -17,7 +18,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.3-final"
+SCRIPT_VERSION="v9.5-final"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 
@@ -267,11 +268,8 @@ read_common_inputs() {
   SNI="$(sanitize_sni "${SNI:-$DEFAULT_SNI}")"
   [[ -n "$SNI" ]] || fatal "SNI 不能为空"
 
-  read -r -p "是否保留 CN/private 阻断路由？[Y/n]: " block_ans
-  case "${block_ans:-Y}" in
-    n|N|no|NO) BLOCK_CN="false" ;;
-    *) BLOCK_CN="true" ;;
-  esac
+  BLOCK_CN="true"
+  info "CN/private 阻断路由：已默认启用。"
 
   SERVER_IP="$(get_public_ip)"
   if [[ -z "$SERVER_IP" ]]; then
@@ -415,15 +413,17 @@ backup_existing_config() {
 }
 
 write_xray_config() {
-  local block_cn_json
-  if [[ "$BLOCK_CN" == "true" ]]; then
-    block_cn_json='[
-      {"type":"field","ip":["geoip:cn","geoip:private"],"outboundTag":"block"},
-      {"type":"field","domain":["geosite:cn"],"outboundTag":"block"}
-    ]'
-  else
-    block_cn_json='[]'
-  fi
+  # 路由策略：
+  # 1. 默认 outbound 为 direct。
+  # 2. 先显式放行 geosite:geolocation-!cn，避免外站服务被 geosite:cn 误伤。
+  # 3. 再阻断 CN 域名、CN IP 和私网 IP。
+  # 4. 不再使用 !geoip:cn / !geoip:private 反选放行；默认 direct 已经足够。
+  # 5. domainStrategy 保持 AsIs，避免服务端额外解析域名后误命中 IP 规则。
+  local rules_json='[
+    {"type":"field","domain":["geosite:geolocation-!cn"],"outboundTag":"direct"},
+    {"type":"field","domain":["geosite:cn"],"outboundTag":"block"},
+    {"type":"field","ip":["geoip:private","geoip:cn"],"outboundTag":"block"}
+  ]'
 
   jq -n \
     --argjson port "$PORT" \
@@ -433,7 +433,7 @@ write_xray_config() {
     --arg private_key "$REALITY_PRIV" \
     --arg short_id "$SHORT_ID" \
     --arg mldsa_seed "$MLDSA_SEED" \
-    --argjson rules "$block_cn_json" \
+    --argjson rules "$rules_json" \
     '
     {
       log: { loglevel: "warning" },
@@ -472,38 +472,48 @@ write_xray_config() {
         { protocol: "freedom", tag: "direct" },
         { protocol: "blackhole", tag: "block" }
       ],
-      routing: { rules: $rules }
+      routing: {
+        domainStrategy: "AsIs",
+        rules: $rules
+      }
     }' > "$CONFIG_PATH"
 }
 
 write_singbox_config() {
-  local route_set_json rules_json
-  if [[ "$BLOCK_CN" == "true" ]]; then
-    route_set_json='[
-      {
-        "type": "remote",
-        "tag": "geosite-cn",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-        "download_detour": "direct"
-      },
-      {
-        "type": "remote",
-        "tag": "geoip-cn",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-        "download_detour": "direct"
-      }
-    ]'
-    rules_json='[
-      {"ip_is_private": true, "action": "route", "outbound": "block"},
-      {"rule_set": "geosite-cn", "action": "route", "outbound": "block"},
-      {"rule_set": "geoip-cn", "action": "route", "outbound": "block"}
-    ]'
-  else
-    route_set_json='[]'
-    rules_json='[]'
-  fi
+  # sing-box 使用 rule_set。路由顺序与 Xray 对齐：geolocation-!cn 先放行，再阻断 CN/private。
+  local route_set_json='[
+    {
+      "type": "remote",
+      "tag": "geosite-geolocation-!cn",
+      "format": "binary",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs",
+      "download_detour": "direct",
+      "update_interval": "1d"
+    },
+    {
+      "type": "remote",
+      "tag": "geosite-cn",
+      "format": "binary",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+      "download_detour": "direct",
+      "update_interval": "1d"
+    },
+    {
+      "type": "remote",
+      "tag": "geoip-cn",
+      "format": "binary",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+      "download_detour": "direct",
+      "update_interval": "1d"
+    }
+  ]'
+
+  local rules_json='[
+    {"rule_set": "geosite-geolocation-!cn", "outbound": "direct"},
+    {"ip_is_private": true, "outbound": "block"},
+    {"rule_set": "geosite-cn", "outbound": "block"},
+    {"rule_set": "geoip-cn", "outbound": "block"}
+  ]'
 
   jq -n \
     --argjson port "$PORT" \
@@ -541,6 +551,7 @@ write_singbox_config() {
         { type: "block", tag: "block" }
       ],
       route: {
+        auto_detect_interface: true,
         rule_set: $route_set,
         rules: $rules,
         final: "direct"
@@ -602,6 +613,7 @@ print_result() {
   info "SNI：${SNI}"
   info "shortId：${SHORT_ID}"
   info "pbk：${REALITY_PUB}"
+  info "CN/private 阻断路由：启用；geolocation-!cn 优先放行"
   info "链接长度：${#link} 字符"
   echo
   echo "$link"
