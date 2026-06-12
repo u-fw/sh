@@ -184,6 +184,7 @@ check_contains freedom.sh 'local -a left_parts right_parts parts' 'freedom.sh IP
 check_contains freedom.sh 'validate_ipv6_literal "\$host"' 'freedom.sh server host validator must use IPv6 literal validator'
 check_contains freedom.sh 'return 1 # malformed hostname' 'freedom.sh server host validator must reject malformed hostnames'
 check_contains freedom.sh 'ip_to_int\(\)' 'freedom.sh missing IPv4 integer conversion helper'
+check_contains freedom.sh '10#\$a' 'freedom.sh IPv4 parsing must force decimal arithmetic'
 check_contains freedom.sh 'ip_in_range\(\)' 'freedom.sh missing IPv4 CIDR range helper'
 check_contains freedom.sh 'ip_in_range "\$ip_num"' 'freedom.sh private/local IPv4 detection must use numeric ranges'
 check_contains freedom.sh 'is_private_or_local_ip\(\)' 'freedom.sh missing private/local IP detector'
@@ -214,9 +215,12 @@ check_not_contains freedom.sh 'type=tcp' 'freedom.sh share link should not use l
 check_not_contains freedom.sh 'spx=%2F' 'freedom.sh should not pin spiderX to root path'
 check_contains freedom.sh '--check, --preflight' 'freedom.sh missing read-only preflight CLI option'
 check_contains freedom.sh 'clear_screen\(\)' 'freedom.sh missing non-interactive clear guard'
+check_contains freedom.sh 'listener_protocol\(\)' 'freedom.sh missing listener protocol selector'
+check_contains freedom.sh 'port_listener_summary "\$PORT" "\$proto"' 'freedom.sh port checks must honor TCP/UDP listener protocol'
+check_contains freedom.sh 'ss -H -lunp "sport = :\$\{port\}"' 'freedom.sh H3 listener checks must inspect UDP sockets'
 check_contains freedom.sh 'verify_service_port_listening\(\)' 'freedom.sh missing post-restart port listener verification'
 check_contains freedom.sh 'verify_service_port_listening' 'freedom.sh restart flow must verify the service port is listening'
-check_contains freedom.sh 'not listening on TCP port' 'freedom.sh must report missing post-restart listener'
+check_contains freedom.sh 'not listening on \$\{proto\^\^\} port' 'freedom.sh must report missing post-restart listener using the expected protocol'
 check_contains freedom.sh 'Xray config install failed' 'freedom.sh must handle config install failures explicitly'
 check_contains freedom.sh 'if ! install -m 600 "\$tmp" "\$CONFIG_PATH"; then' 'freedom.sh config install must not rely on errexit'
 check_contains freedom.sh 'fallback: xray -test -config' 'freedom.sh config validation must preserve fallback test diagnostics'
@@ -224,6 +228,34 @@ check_contains freedom.sh 'usage_error\(\)' 'freedom.sh missing CLI usage error 
 check_contains freedom.sh 'require_option_value\(\)' 'freedom.sh missing CLI option value validator'
 check_contains freedom.sh 'require_option_value "--sni"' 'freedom.sh CLI must validate --sni values'
 check_contains freedom.sh 'require_option_value "--xray-encryption"' 'freedom.sh CLI must validate --xray-encryption values'
+check_contains freedom.sh '--mode MODE' 'freedom.sh missing deployment mode CLI option'
+check_contains freedom.sh '--cdn-xhttp-tls' 'freedom.sh missing CDN XHTTP TLS shortcut option'
+check_contains freedom.sh 'Deployment profile: 1=REALITY-VISION \(direct\), 2=XHTTP-TLS \(CDN\)' 'freedom.sh deployment prompt should use polished uppercase profile names'
+check_contains freedom.sh 'FREEDOM_MODE=reality\|cdn-xhttp-tls' 'freedom.sh missing deployment mode environment option'
+check_contains freedom.sh 'FREEDOM_XHTTP_PATH=' 'freedom.sh missing XHTTP path environment option'
+check_contains freedom.sh 'FREEDOM_XHTTP_ALPN=' 'freedom.sh missing XHTTP ALPN environment option'
+check_contains freedom.sh 'FREEDOM_TLS_CERT_FILE=' 'freedom.sh missing TLS certificate environment option'
+check_contains freedom.sh 'FREEDOM_TLS_KEY_FILE=' 'freedom.sh missing TLS key environment option'
+check_contains freedom.sh 'FREEDOM_TLS_CERT_MODE=' 'freedom.sh missing TLS certificate mode environment option'
+check_contains freedom.sh 'normalize_deploy_mode\(\)' 'freedom.sh missing deployment mode normalizer'
+check_contains freedom.sh 'normalize_tls_cert_mode\(\)' 'freedom.sh missing TLS certificate mode normalizer'
+check_contains freedom.sh 'normalize_xhttp_alpn_choice\(\)' 'freedom.sh missing XHTTP ALPN normalizer'
+check_contains freedom.sh 'Certificate profile: 1=PUBLIC CA, 2=CLOUDFLARE ORIGIN CA' 'freedom.sh TLS certificate prompt must support polished numeric choices'
+check_contains freedom.sh 'ALPN profile: 1=STABLE \(H2\+HTTP/1\.1\), 2=H2 ONLY, 3=H3 ONLY \(UDP/443\)' 'freedom.sh ALPN prompt must support stable, H2-only, and H3-only choices'
+check_contains freedom.sh 'validate_xhttp_path\(\)' 'freedom.sh missing XHTTP path validator'
+check_contains freedom.sh 'xhttp_alpn_profile_json\(\)' 'freedom.sh missing XHTTP ALPN profile helper'
+check_contains freedom.sh 'validate_tls_cert_files\(\)' 'freedom.sh missing TLS certificate file validator'
+check_contains freedom.sh 'write_xray_config_xhttp_tls\(\)' 'freedom.sh missing XHTTP TLS config writer'
+check_contains freedom.sh 'network: "xhttp"' 'freedom.sh CDN mode must use XHTTP network'
+check_contains freedom.sh 'security: "tls"' 'freedom.sh CDN mode must use TLS security'
+check_contains freedom.sh 'xhttpSettings' 'freedom.sh CDN mode missing xhttpSettings'
+check_contains freedom.sh 'certificateFile: \$tls_cert_file' 'freedom.sh CDN mode must use certificate file paths'
+check_contains freedom.sh 'keyFile: \$tls_key_file' 'freedom.sh CDN mode must use key file paths'
+check_contains freedom.sh 'clients: \[ \{ id: \$uuid \} \]' 'freedom.sh CDN mode must not set Vision flow on XHTTP clients'
+check_contains freedom.sh 'type=xhttp' 'freedom.sh CDN share link must use XHTTP type'
+check_contains freedom.sh 'security=tls' 'freedom.sh CDN share link must use TLS security'
+check_contains freedom.sh 'mode=auto' 'freedom.sh CDN share link should use XHTTP auto mode'
+check_contains freedom.sh 'Cloudflare Origin CA certificates are only trusted by Cloudflare' 'freedom.sh must warn about Cloudflare Origin CA trust scope'
 check_contains freedom.sh 'validate_generated_config "\$tmp"' 'freedom.sh must validate generated temp config before installing it'
 check_contains freedom.sh '"\$BIN" run -test -c "\$config_file"' 'freedom.sh temp config validation must use xray run -test before install'
 check_contains freedom.sh 'H2 is recommended, not mandatory' 'freedom.sh must treat missing H2 as a warning instead of a hard failure'
@@ -285,11 +317,74 @@ expect_rc 2 bash ./vps_init_tool.sh --lang
 expect_rc 2 bash ./vps_init_tool.sh --ports
 expect_rc 2 bash ./vps_init_tool.sh --status --audit
 bash ./vps_init_tool.sh --preflight >/dev/null || fail 'vps_init_tool.sh --preflight failed'
+
+freedom_lib="$(mktemp)"
+trap 'rm -f "$vps_lib" "$freedom_lib"' EXIT
+sed '/^handle_cli "\$@"/,$d' freedom.sh > "$freedom_lib"
+# shellcheck source=/dev/null
+source "$freedom_lib"
+if ip_to_int 08.8.8.8 >/dev/null 2>&1; then fail 'freedom.sh ip_to_int accepted ambiguous leading-zero IPv4'; fi
+if validate_link_host 08.8.8.8 >/dev/null 2>&1; then fail 'freedom.sh validate_link_host accepted ambiguous leading-zero IPv4'; fi
+validate_link_host 1.2.3.4 || fail 'freedom.sh validate_link_host rejected IPv4'
+validate_link_host example.com || fail 'freedom.sh validate_link_host rejected domain'
+validate_link_host 2001:4860:4860::8888 || fail 'freedom.sh validate_link_host rejected IPv6'
+[ "$(normalize_deploy_mode 1)" = "reality" ] || fail 'freedom.sh normalize_deploy_mode rejected 1'
+[ "$(normalize_deploy_mode cdn)" = "cdn-xhttp-tls" ] || fail 'freedom.sh normalize_deploy_mode rejected cdn'
+[ "$(normalize_deploy_mode XHTTP-TLS)" = "cdn-xhttp-tls" ] || fail 'freedom.sh normalize_deploy_mode rejected XHTTP-TLS'
+[ "$(normalize_tls_cert_mode 1)" = "public" ] || fail 'freedom.sh normalize_tls_cert_mode rejected 1'
+[ "$(normalize_tls_cert_mode 2)" = "cloudflare-origin" ] || fail 'freedom.sh normalize_tls_cert_mode rejected 2'
+[ "$(normalize_tls_cert_mode cf-origin)" = "cloudflare-origin" ] || fail 'freedom.sh normalize_tls_cert_mode rejected cf-origin'
+[ "$(normalize_tls_cert_mode PUBLIC)" = "public" ] || fail 'freedom.sh normalize_tls_cert_mode rejected PUBLIC'
+if normalize_tls_cert_mode maybe >/dev/null 2>&1; then fail 'freedom.sh normalize_tls_cert_mode accepted invalid mode'; fi
+[ "$(normalize_xhttp_alpn_choice 1)" = "stable" ] || fail 'freedom.sh normalize_xhttp_alpn_choice rejected 1'
+[ "$(normalize_xhttp_alpn_choice 2)" = "h2" ] || fail 'freedom.sh normalize_xhttp_alpn_choice rejected 2'
+[ "$(normalize_xhttp_alpn_choice 3)" = "h3" ] || fail 'freedom.sh normalize_xhttp_alpn_choice rejected 3'
+[ "$(normalize_xhttp_alpn_choice H2)" = "h2" ] || fail 'freedom.sh normalize_xhttp_alpn_choice rejected H2'
+[ "$(normalize_xhttp_alpn_choice H3)" = "h3" ] || fail 'freedom.sh normalize_xhttp_alpn_choice rejected H3'
+if normalize_xhttp_alpn_choice h4 >/dev/null 2>&1; then fail 'freedom.sh normalize_xhttp_alpn_choice accepted invalid mode'; fi
+validate_xhttp_path /cdn-abc123 || fail 'freedom.sh validate_xhttp_path rejected valid path'
+if validate_xhttp_path / >/dev/null 2>&1; then fail 'freedom.sh validate_xhttp_path accepted root path'; fi
+if validate_xhttp_path cdn-abc >/dev/null 2>&1; then fail 'freedom.sh validate_xhttp_path accepted path without slash'; fi
+if validate_xhttp_path '/bad path' >/dev/null 2>&1; then fail 'freedom.sh validate_xhttp_path accepted path with spaces'; fi
+[ "$(xhttp_alpn_profile_json stable)" = '["h2","http/1.1"]' ] || fail 'freedom.sh stable XHTTP ALPN profile drifted'
+[ "$(xhttp_alpn_profile_json h2)" = '["h2"]' ] || fail 'freedom.sh h2 XHTTP ALPN profile drifted'
+[ "$(xhttp_alpn_profile_json h3)" = '["h3"]' ] || fail 'freedom.sh h3 XHTTP ALPN profile drifted'
+if xhttp_alpn_profile_json h3,h2 >/dev/null 2>&1; then fail 'freedom.sh XHTTP ALPN accepted mixed h3,h2 profile'; fi
+DEPLOY_MODE=reality
+XHTTP_ALPN_CHOICE=stable
+[ "$(listener_protocol)" = "tcp" ] || fail 'freedom.sh listener_protocol must use TCP for REALITY'
+DEPLOY_MODE=cdn-xhttp-tls
+XHTTP_ALPN_CHOICE=h2
+[ "$(listener_protocol)" = "tcp" ] || fail 'freedom.sh listener_protocol must use TCP for XHTTP H2'
+XHTTP_ALPN_CHOICE=h3
+[ "$(listener_protocol)" = "udp" ] || fail 'freedom.sh listener_protocol must use UDP for XHTTP H3'
+DEPLOY_MODE=cdn-xhttp-tls
+UUID=11111111-1111-4111-8111-111111111111
+SERVER_HOST_FOR_LINK=example.com
+PORT=443
+SNI=cdn.example.com
+XHTTP_PATH=/cdn-test
+XHTTP_ALPN_JSON='["h2","http/1.1"]'
+VLESS_ENC=none
+NODE_NAME=test-node
+cdn_link="$(build_link)"
+printf '%s\n' "$cdn_link" | grep -q 'type=xhttp' || fail 'freedom.sh CDN link missing type=xhttp'
+printf '%s\n' "$cdn_link" | grep -q 'security=tls' || fail 'freedom.sh CDN link missing security=tls'
+printf '%s\n' "$cdn_link" | grep -q 'path=%2Fcdn-test' || fail 'freedom.sh CDN link must URL-encode XHTTP path'
+printf '%s\n' "$cdn_link" | grep -q 'alpn=h2%2Chttp%2F1.1' || fail 'freedom.sh CDN link must URL-encode ALPN list'
+printf '%s\n' "$cdn_link" | grep -q 'mode=auto' || fail 'freedom.sh CDN link missing mode=auto'
 expect_rc 2 bash ./freedom.sh --sni
 expect_rc 2 bash ./freedom.sh --sni --no-qr
 expect_rc 2 bash ./freedom.sh --port --sni example.com
 expect_rc 2 bash ./freedom.sh --xray-encryption
 expect_rc 2 bash ./freedom.sh --xray-encryption --no-qr
+expect_rc 2 bash ./freedom.sh --mode
+expect_rc 2 bash ./freedom.sh --mode invalid
+expect_rc 2 bash ./freedom.sh --xhttp-path
+expect_rc 2 bash ./freedom.sh --tls-cert-file
+expect_rc 2 bash ./freedom.sh --tls-key-file
+expect_rc 2 bash ./freedom.sh --tls-cert-mode invalid
+expect_rc 2 bash ./freedom.sh --xhttp-alpn invalid
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck vps_init_tool.sh verify.sh
