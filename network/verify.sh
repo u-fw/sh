@@ -53,6 +53,9 @@ check_not_exact_line vps_init_tool.sh '  log_action "cli" "command=$cmd complete
 check_contains vps_init_tool.sh 'LOG_FILE=' 'vps_init_tool.sh missing operation log file setting'
 check_contains vps_init_tool.sh 'log_action\(\)' 'vps_init_tool.sh missing operation logger'
 check_contains vps_init_tool.sh 'restore_managed_file\(\)' 'vps_init_tool.sh missing managed configuration rollback helper'
+check_contains vps_init_tool.sh 'normalize_yes_no\(\)' 'vps_init_tool.sh missing y/n normalization helper'
+check_contains vps_init_tool.sh 'input_yes_no\(\)' 'vps_init_tool.sh missing y/n compatible yes/no prompt helper'
+check_contains vps_init_tool.sh 'normalize_password_policy\(\)' 'vps_init_tool.sh missing y/n compatible SSH password policy helper'
 check_contains vps_init_tool.sh 'APT_LOCK_TIMEOUT=' 'vps_init_tool.sh missing apt lock timeout setting'
 check_contains vps_init_tool.sh 'APT_RETRIES=' 'vps_init_tool.sh missing apt retry setting'
 check_contains vps_init_tool.sh 'apt_get_retry\(\)' 'vps_init_tool.sh missing apt retry helper'
@@ -127,10 +130,15 @@ check_contains vps_init_tool.sh 'ssh_remove_hardening_fragment\(\)' 'vps_init_to
 check_contains vps_init_tool.sh 'ssh_restore_hardening_backup\(\)' 'vps_init_tool.sh missing SSH hardening backup restore helper'
 check_contains vps_init_tool.sh 'fragment_backup="\$BACKUP_LAST_PATH"' 'vps_init_tool.sh must retain the previous SSH hardening fragment backup path'
 check_contains vps_init_tool.sh 'ssh_restore_hardening_backup "\$fragment_backup"' 'vps_init_tool.sh must restore the previous SSH hardening fragment on failure'
+check_contains vps_init_tool.sh 'ssh_key_line_valid\(\)' 'vps_init_tool.sh missing authorized_keys line validator'
+check_contains vps_init_tool.sh 'user_has_authorized_key\(\)' 'vps_init_tool.sh missing key-login readiness helper'
+check_contains vps_init_tool.sh 'ssh_require_key_login_ready\(\)' 'vps_init_tool.sh must verify usable public keys before disabling SSH passwords'
 check_contains vps_init_tool.sh 'valid_ssh_public_key\(\)' 'vps_init_tool.sh missing SSH public key format validation helper'
+check_contains vps_init_tool.sh 'ssh-keygen -l -f' 'vps_init_tool.sh must validate SSH public keys with ssh-keygen when available'
 check_contains vps_init_tool.sh 'valid_ssh_public_key "\$key"' 'vps_init_tool.sh must validate SSH public keys before installing'
 check_contains vps_init_tool.sh 'group="\$\(id -gn "\$user" 2>/dev/null \|\| echo "\$user"\)"' 'vps_init_tool.sh must chown SSH keys using the user primary group'
 check_contains vps_init_tool.sh 'SSH_CONNECTION' 'vps_init_tool.sh must include the current SSH session port when protecting firewall access'
+check_contains vps_init_tool.sh 'ufw_ensure_ssh_access \|\| \{ ssh_restore_hardening_backup "\$fragment_backup"; return 1; \}' 'vps_init_tool.sh SSH hardening must protect current SSH ports before reload'
 check_contains vps_init_tool.sh 'SSH firewall allow failed' 'vps_init_tool.sh must abort SSH hardening if the firewall rule cannot be added'
 check_not_contains vps_init_tool.sh 'if has_cmd ufw; then ufw allow "\$port/tcp" comment "SSH" \|\| true; fi' 'vps_init_tool.sh must not ignore SSH firewall allow failures'
 check_contains vps_init_tool.sh 'SSH service reload/restart failed' 'vps_init_tool.sh must report failed SSH activation'
@@ -151,6 +159,8 @@ check_not_contains vps_init_tool.sh 'systemctl restart systemd-journald \|\| tru
 check_not_contains vps_init_tool.sh 'backup_path .* >/dev/null \|\| true' 'vps_init_tool.sh must not overwrite managed configuration after a failed backup'
 check_not_contains vps_init_tool.sh 'ufw limit "\$p/tcp" comment "rate-limit-ssh" \|\| true' 'vps_init_tool.sh must not hide SSH rate-limit rule failures'
 check_not_contains vps_init_tool.sh 'fail2ban-client set "\$jail" unbanip "\$ip" \|\| true' 'vps_init_tool.sh must not hide Fail2ban unban failures'
+check_contains vps_init_tool.sh 'valid_ip_literal "\$ip"' 'vps_init_tool.sh must validate Fail2ban unban IP addresses'
+check_contains vps_init_tool.sh 'Invalid IP to unban' 'vps_init_tool.sh must report invalid Fail2ban unban IP addresses'
 
 check_contains freedom.sh 'SCRIPT_VERSION="v9\.11-xray"' 'freedom.sh version drifted'
 check_contains freedom.sh 'DEFAULT_SNI="v1-dy\.ixigua\.com"' 'freedom.sh default SNI drifted'
@@ -210,6 +220,14 @@ check_contains freedom.sh 'not listening on TCP port' 'freedom.sh must report mi
 check_contains freedom.sh 'Xray config install failed' 'freedom.sh must handle config install failures explicitly'
 check_contains freedom.sh 'if ! install -m 600 "\$tmp" "\$CONFIG_PATH"; then' 'freedom.sh config install must not rely on errexit'
 check_contains freedom.sh 'fallback: xray -test -config' 'freedom.sh config validation must preserve fallback test diagnostics'
+check_contains freedom.sh 'usage_error\(\)' 'freedom.sh missing CLI usage error helper'
+check_contains freedom.sh 'require_option_value\(\)' 'freedom.sh missing CLI option value validator'
+check_contains freedom.sh 'require_option_value "--sni"' 'freedom.sh CLI must validate --sni values'
+check_contains freedom.sh 'require_option_value "--xray-encryption"' 'freedom.sh CLI must validate --xray-encryption values'
+check_contains freedom.sh 'validate_generated_config "\$tmp"' 'freedom.sh must validate generated temp config before installing it'
+check_contains freedom.sh '"\$BIN" run -test -c "\$config_file"' 'freedom.sh temp config validation must use xray run -test before install'
+check_contains freedom.sh 'H2 is recommended, not mandatory' 'freedom.sh must treat missing H2 as a warning instead of a hard failure'
+check_not_contains freedom.sh '\[\[ "\$tls_ok" -ne 1 \|\| "\$h2_ok" -ne 1 \]\]' 'freedom.sh must not require H2 for SNI usability'
 check_contains freedom.sh '\{"type":"field","ip":\["geoip:private"\],"outboundTag":"block"\}' 'freedom.sh route must block private IP first'
 check_contains freedom.sh '\{"type":"field","protocol":\["bittorrent"\],"outboundTag":"block"\}' 'freedom.sh route must block bittorrent traffic through Xray'
 check_contains freedom.sh '\{"type":"field","domain":\["geosite:geolocation-!cn"\],"outboundTag":"direct"\}' 'freedom.sh route must direct known non-CN domains before CN blocks'
@@ -245,6 +263,13 @@ if valid_size_mb_gb 1T; then fail 'valid_size_mb_gb accepted unsupported size 1T
 valid_ip_literal 1.1.1.1 || fail 'valid_ip_literal rejected IPv4'
 valid_ip_literal 2606:4700:4700::1111 || fail 'valid_ip_literal rejected IPv6'
 if valid_ip_literal 999.1.1.1; then fail 'valid_ip_literal accepted invalid IPv4'; fi
+[ "$(normalize_yes_no y)" = "yes" ] || fail 'normalize_yes_no rejected y'
+[ "$(normalize_yes_no N)" = "no" ] || fail 'normalize_yes_no rejected N'
+if normalize_yes_no maybe >/dev/null 2>&1; then fail 'normalize_yes_no accepted invalid text'; fi
+[ "$(normalize_password_policy k)" = "keep" ] || fail 'normalize_password_policy rejected k'
+[ "$(normalize_password_policy n)" = "no" ] || fail 'normalize_password_policy rejected n'
+[ "$(normalize_password_policy Y)" = "yes" ] || fail 'normalize_password_policy rejected Y'
+if normalize_password_policy maybe >/dev/null 2>&1; then fail 'normalize_password_policy accepted invalid text'; fi
 
 get_mem_mb() { echo 1024; }
 get_root_avail_mb() { echo 100; }
@@ -260,6 +285,11 @@ expect_rc 2 bash ./vps_init_tool.sh --lang
 expect_rc 2 bash ./vps_init_tool.sh --ports
 expect_rc 2 bash ./vps_init_tool.sh --status --audit
 bash ./vps_init_tool.sh --preflight >/dev/null || fail 'vps_init_tool.sh --preflight failed'
+expect_rc 2 bash ./freedom.sh --sni
+expect_rc 2 bash ./freedom.sh --sni --no-qr
+expect_rc 2 bash ./freedom.sh --port --sni example.com
+expect_rc 2 bash ./freedom.sh --xray-encryption
+expect_rc 2 bash ./freedom.sh --xray-encryption --no-qr
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck vps_init_tool.sh verify.sh

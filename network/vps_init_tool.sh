@@ -174,6 +174,40 @@ input_default() {
   printf '%s\n' "${value:-$default}"
 }
 
+normalize_yes_no() {
+  case "${1:-}" in
+    y|Y|yes|YES|Yes) printf 'yes\n' ;;
+    n|N|no|NO|No) printf 'no\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+input_yes_no() {
+  local prompt="$1" default="$2" value normalized_default
+  normalized_default="$(normalize_yes_no "$default")" || return 1
+  if [ "${NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    printf '%s\n' "$normalized_default"
+    return 0
+  fi
+  while true; do
+    read -r -p "$prompt [$normalized_default, y/n]: " value || true
+    value="${value:-$normalized_default}"
+    if normalize_yes_no "$value"; then
+      return 0
+    fi
+    red "$(m 'Please enter y or n.' 'Please enter y or n.')"
+  done
+}
+
+normalize_password_policy() {
+  case "${1:-}" in
+    keep|KEEP|Keep|k|K) printf 'keep\n' ;;
+    no|NO|No|n|N) printf 'no\n' ;;
+    yes|YES|Yes|y|Y) printf 'yes\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 make_backup_dir() { mkdir -p "$BACKUP_ROOT"; }
 backup_path() {
   local p="$1" safe dest
@@ -687,7 +721,7 @@ EOF2
 
 setup_zram() {
   local enable size_hint
-  enable="$(input_default "$(m 'Enable/configure ZRAM? yes/no' '启用/配置 ZRAM？yes/no')" "yes")"
+  enable="$(input_yes_no "$(m 'Enable/configure ZRAM?' '启用/配置 ZRAM？')" "yes")" || return 1
   [ "$enable" = "yes" ] || { yellow "$(m 'ZRAM skipped.' '已跳过 ZRAM。')"; return 0; }
   is_systemd || { red "$(m 'systemd not detected. ZRAM auto-start setup skipped.' '未检测到 systemd，跳过 ZRAM 自启动配置。')"; return 1; }
   zram_supported || { red "$(m 'ZRAM not supported by this kernel/VPS layer.' '当前内核或 VPS 虚拟化层不支持 ZRAM。')"; return 1; }
@@ -954,14 +988,98 @@ ssh_audit() {
 }
 
 valid_ssh_public_key() {
-  local key="$1" type blob rest
+  local key="$1" type blob rest tmp rc
   read -r type blob rest <<< "$key"
   [ -n "$type" ] && [ -n "$blob" ] || return 1
   case "$type" in
     ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) ;;
     *) return 1 ;;
   esac
-  [[ "$blob" =~ ^[A-Za-z0-9+/]+={0,3}$ ]]
+  [[ "$blob" =~ ^[A-Za-z0-9+/]+={0,3}$ ]] || return 1
+  if has_cmd ssh-keygen; then
+    tmp="$(mktemp)" || return 1
+    printf '%s\n' "$key" > "$tmp" || { rm -f "$tmp"; return 1; }
+    ssh-keygen -l -f "$tmp" >/dev/null 2>&1
+    rc=$?
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  return 0
+}
+
+extract_ssh_key_from_authorized_line() {
+  local line="$1" i j
+  local -a parts
+  read -r -a parts <<< "$line"
+  for i in "${!parts[@]}"; do
+    case "${parts[$i]}" in
+      ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com)
+        printf '%s' "${parts[$i]}"
+        for ((j = i + 1; j < ${#parts[@]}; j++)); do
+          printf ' %s' "${parts[$j]}"
+        done
+        printf '\n'
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+ssh_key_line_valid() {
+  local line="$1" key
+  [ -n "$line" ] || return 1
+  [[ "$line" != \#* ]] || return 1
+  key="$(extract_ssh_key_from_authorized_line "$line")" || return 1
+  valid_ssh_public_key "$key"
+}
+
+user_has_authorized_key() {
+  local user="$1" home auth line
+  if [ "$user" = "root" ]; then
+    home="/root"
+  else
+    home="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"
+  fi
+  [ -n "$home" ] && [ -r "$home/.ssh/authorized_keys" ] || return 1
+  auth="$home/.ssh/authorized_keys"
+  while IFS= read -r line; do
+    ssh_key_line_valid "$line" && return 0
+  done < "$auth"
+  return 1
+}
+
+ssh_require_key_login_ready() {
+  local allow_users="$1" permit_root="${2:-prohibit-password}" token user found=0
+  if [ -n "$allow_users" ]; then
+    for token in $allow_users; do
+      user="${token%@*}"
+      case "$user" in
+        ""|*[\*\?]*) continue ;;
+      esac
+      [ "$user" = "root" ] && [ "$permit_root" = "no" ] && continue
+      if user_has_authorized_key "$user"; then
+        found=1
+        break
+      fi
+    done
+  else
+    if [ "$permit_root" != "no" ] && user_has_authorized_key root; then
+      found=1
+    else
+      while IFS=: read -r user _; do
+        [ "$user" = "root" ] && continue
+        if user_has_authorized_key "$user"; then
+          found=1
+          break
+        fi
+      done < <(interactive_users)
+    fi
+  fi
+  [ "$found" -eq 1 ] && return 0
+  red "$(m 'Refusing to disable SSH password login: no usable authorized_keys entry was found.' 'Refusing to disable SSH password login: no usable authorized_keys entry was found.')"
+  status_info "$(m 'Install a public key first, or keep PasswordAuthentication as keep until key login is tested.' 'Install a public key first, or keep PasswordAuthentication as keep until key login is tested.')"
+  return 1
 }
 
 ssh_install_key() {
@@ -1013,18 +1131,17 @@ ssh_write_hardening() {
   port="$(input_default "$(m 'New SSH port' '新的 SSH 端口')" "$(current_ssh_port_guess)")"
   valid_port "$port" || { red "$(m 'Invalid SSH port. Use 1-65535.' 'SSH 端口无效，请使用 1-65535。')"; return 1; }
   allow_user="$(input_default "$(m 'AllowUsers value, empty means do not set' 'AllowUsers 值，留空表示不设置')" "")"
-  password_policy="$(input_default "$(m 'PasswordAuthentication policy: keep/no/yes' 'PasswordAuthentication 策略：keep/no/yes')" "keep")"
-  case "$password_policy" in
-    keep|no|yes) ;;
-    *) red "$(m 'Invalid PasswordAuthentication policy. Use keep, no, or yes.' 'PasswordAuthentication 策略无效，请使用 keep、no 或 yes。')"; return 1 ;;
-  esac
+  password_policy="$(normalize_password_policy "$(input_default "$(m 'PasswordAuthentication policy: keep/no/yes' 'PasswordAuthentication 策略：keep/no/yes')" "keep")")" || { red "$(m 'Invalid PasswordAuthentication policy. Use keep, no, or yes.' 'PasswordAuthentication 策略无效，请使用 keep、no 或 yes。')"; return 1; }
   if [ "$password_policy" = "yes" ]; then
     yellow "$(m 'Enabling SSH password login is usually not recommended.' '通常不建议开启 SSH 密码登录。')"
     confirm_yes "$(m 'Explicitly enable SSH password login?' '明确开启 SSH 密码登录？')" || return 0
   fi
   permit_root="$(input_default "PermitRootLogin" "prohibit-password")"
-  strict_forwarding="$(input_default "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding? yes/no' '关闭 Agent/X11/Tunnel/Gateway 转发？yes/no')" "yes")"
-  allow_tcp="$(input_default "$(m 'Allow TCP forwarding for ssh -L/-R/-D? yes/no' '允许 TCP 转发用于 ssh -L/-R/-D？yes/no')" "yes")"
+  strict_forwarding="$(input_yes_no "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding?' '关闭 Agent/X11/Tunnel/Gateway 转发？')" "yes")" || return 1
+  allow_tcp="$(input_yes_no "$(m 'Allow TCP forwarding for ssh -L/-R/-D?' '允许 TCP 转发用于 ssh -L/-R/-D？')" "yes")" || return 1
+  if [ "$password_policy" = "no" ]; then
+    ssh_require_key_login_ready "$allow_user" "$permit_root" || return 1
+  fi
 
   backup_path /etc/ssh/sshd_config >/dev/null
   mkdir -p /etc/ssh/sshd_config.d
@@ -1072,10 +1189,13 @@ EOF2
     return 1
   fi
 
-  if has_cmd ufw && ! ufw allow "$port/tcp" comment "SSH"; then
-    red "$(m 'SSH firewall allow failed; restoring the previous fragment before SSH reload.' 'SSH 防火墙放行失败；在重载 SSH 前恢复之前的片段。')"
-    ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' '恢复之前的 SSH 配置失败；请保持当前 SSH 会话并手动检查 sshd。')"
-    return 1
+  if has_cmd ufw; then
+    ufw_ensure_ssh_access || { ssh_restore_hardening_backup "$fragment_backup"; return 1; }
+    if ! ufw allow "$port/tcp" comment "SSH"; then
+      red "$(m 'SSH firewall allow failed; restoring the previous fragment before SSH reload.' 'SSH 防火墙放行失败；在重载 SSH 前恢复之前的片段。')"
+      ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' '恢复之前的 SSH 配置失败；请保持当前 SSH 会话并手动检查 sshd。')"
+      return 1
+    fi
   fi
   if ! ssh_reload_or_restart; then
     red "SSH service reload/restart failed; restoring the previous hardening fragment to preserve existing access."
@@ -1474,6 +1594,7 @@ fail2ban_unban() {
   jail="$(input_default "Jail" "sshd")"
   ip="$(input_default "$(m 'IP to unban' '要解封的 IP')" "")"
   [ -n "$ip" ] || return 1
+  valid_ip_literal "$ip" || { red "$(m 'Invalid IP to unban.' 'Invalid IP to unban.')"; return 1; }
   fail2ban-client set "$jail" unbanip "$ip"
 }
 

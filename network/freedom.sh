@@ -66,6 +66,19 @@ ok() { echo -e "${GREEN}[OK] $*${NC}"; }
 warn() { echo -e "${YELLOW}[WARN] $*${NC}"; }
 fatal() { echo -e "${RED}[ERROR] $*${NC}" >&2; exit 1; }
 
+usage_error() {
+  echo -e "${RED}[ERROR] $*${NC}" >&2
+  echo "Use --help to view usage." >&2
+  exit 2
+}
+
+require_option_value() {
+  local opt="$1" value="${2:-}"
+  if [[ -z "$value" || "$value" == -* ]]; then
+    usage_error "Missing value for $opt"
+  fi
+}
+
 clear_screen() {
   [[ "${NONINTERACTIVE:-0}" == "1" ]] && return 0
   clear 2>/dev/null || true
@@ -496,9 +509,12 @@ probe_sni_domain() {
       warn "SNI target did not negotiate HTTP/2 via ALPN."
     fi
 
-    if [[ "$tls_ok" -ne 1 || "$h2_ok" -ne 1 ]]; then
-      warn "REALITY targets are usually expected to support TLS 1.3 and H2."
+    if [[ "$tls_ok" -ne 1 ]]; then
+      warn "REALITY targets are expected to support TLS 1.3."
       return 1
+    fi
+    if [[ "$h2_ok" -ne 1 ]]; then
+      warn "SNI target did not negotiate H2. H2 is recommended, not mandatory; continuing."
     fi
   elif [[ "$xray_ping_rc" -eq 0 ]]; then
     warn "openssl is missing; skipped secondary TLS 1.3/ALPN check."
@@ -1026,6 +1042,23 @@ backup_existing_config() {
   fi
 }
 
+validate_generated_config() {
+  local config_file="$1" test_log
+  info "检查配置文件：$config_file"
+  jq empty "$config_file" || return 1
+
+  test_log="$(mktemp)"
+  if ! "$BIN" run -test -c "$config_file" >"$test_log" 2>&1; then
+    printf '\n--- fallback: xray -test -config ---\n' >> "$test_log"
+    if ! "$BIN" -test -config "$config_file" >>"$test_log" 2>&1; then
+      cat "$test_log" >&2
+      rm -f "$test_log"
+      return 1
+    fi
+  fi
+  rm -f "$test_log"
+}
+
 write_xray_config() {
   # Routing policy:
   # 1. The first outbound is direct, so unmatched traffic is allowed by default.
@@ -1097,6 +1130,10 @@ write_xray_config() {
     rm -f "$tmp"
     fatal_with_rollback "Xray config generation failed"
   fi
+  if ! validate_generated_config "$tmp"; then
+    rm -f "$tmp"
+    fatal_with_rollback "Xray generated temp config test failed"
+  fi
   if ! install -m 600 "$tmp" "$CONFIG_PATH"; then
     rm -f "$tmp"
     fatal_with_rollback "Xray config install failed"
@@ -1105,20 +1142,7 @@ write_xray_config() {
 }
 
 validate_config() {
-  local test_log
-  info "检查配置文件"
-  jq empty "$CONFIG_PATH" || fatal_with_rollback "JSON 语法错误：$CONFIG_PATH"
-
-  test_log="$(mktemp)"
-  if ! "$BIN" run -test -c "$CONFIG_PATH" >"$test_log" 2>&1; then
-    printf '\n--- fallback: xray -test -config ---\n' >> "$test_log"
-    if ! "$BIN" -test -config "$CONFIG_PATH" >>"$test_log" 2>&1; then
-      cat "$test_log" >&2
-      rm -f "$test_log"
-      fatal_with_rollback "Xray 配置测试失败"
-    fi
-  fi
-  rm -f "$test_log"
+  validate_generated_config "$CONFIG_PATH" || fatal_with_rollback "Xray 配置测试失败"
 }
 
 verify_service_port_listening() {
@@ -1275,23 +1299,28 @@ handle_cli() {
         ;;
       --port)
         shift
-        CLI_PORT="${1:-}"
+        require_option_value "--port" "${1:-}"
+        CLI_PORT="$1"
         ;;
       --sni)
         shift
-        CLI_SNI="${1:-}"
+        require_option_value "--sni" "${1:-}"
+        CLI_SNI="$1"
         ;;
       --node-name)
         shift
-        CLI_NODE_NAME="${1:-}"
+        require_option_value "--node-name" "${1:-}"
+        CLI_NODE_NAME="$1"
         ;;
       --server)
         shift
-        CLI_SERVER="${1:-}"
+        require_option_value "--server" "${1:-}"
+        CLI_SERVER="$1"
         ;;
       --xray-encryption)
         shift
-        XRAY_ENCRYPTION_CHOICE="${1:-}"
+        require_option_value "--xray-encryption" "${1:-}"
+        XRAY_ENCRYPTION_CHOICE="$1"
         ;;
       --enable-mldsa)
         ENABLE_MLDSA=1
@@ -1309,7 +1338,7 @@ handle_cli() {
         NO_QR=1
         ;;
       *)
-        fatal "未知参数：$1。使用 --help 查看用法。"
+        usage_error "Unknown option: $1"
         ;;
     esac
     shift
