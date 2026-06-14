@@ -3,7 +3,7 @@
 # VLESS + REALITY 自动配置脚本
 # - 专精 Xray-core；未安装时可使用 XTLS 官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
-# - CN/private 阻断默认启用；geolocation-!cn 优先放行，再阻断 CN/private
+# - CN/private 阻断默认启用；未命中规则的流量走默认 direct 出站
 # - 二维码默认不生成，最后按需生成，避免长链接导致 qrencode 报错
 # - 启动前检测端口占用；非 xray 进程占用时明确报错
 # - 写入配置前自动备份；检查/启动失败时可交互恢复备份
@@ -1264,7 +1264,6 @@ write_xray_config_xhttp_tls() {
   local tmp rules_json='[
     {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
     {"type":"field","protocol":["bittorrent"],"outboundTag":"block"},
-    {"type":"field","domain":["geosite:geolocation-!cn"],"outboundTag":"direct"},
     {"type":"field","domain":["geosite:cn"],"outboundTag":"block"},
     {"type":"field","ip":["geoip:cn"],"outboundTag":"block"}
   ]'
@@ -1346,12 +1345,11 @@ write_xray_config() {
   # 1. The first outbound is direct, so unmatched traffic is allowed by default.
   # 2. Block private IPs first to avoid proxy access to local/cloud metadata networks.
   # 3. Block BitTorrent traffic that goes through this Xray inbound.
-  # 4. Direct known non-CN domains before CN IP blocking to avoid CDN/geolocation false blocks.
+  # 4. Unmatched traffic uses the first outbound (direct); no explicit geolocation-!cn rule is needed.
   # 5. Keep domainStrategy=AsIs to avoid extra server-side DNS resolution.
   local tmp rules_json='[
     {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
     {"type":"field","protocol":["bittorrent"],"outboundTag":"block"},
-    {"type":"field","domain":["geosite:geolocation-!cn"],"outboundTag":"direct"},
     {"type":"field","domain":["geosite:cn"],"outboundTag":"block"},
     {"type":"field","ip":["geoip:cn"],"outboundTag":"block"}
   ]'
@@ -1529,7 +1527,7 @@ print_result() {
     info "XHTTP ALPN: ${XHTTP_ALPN_CHOICE} ${XHTTP_ALPN_JSON}"
     info "Certificate profile: ${TLS_CERT_MODE}"
     info "Node name: ${NODE_NAME}"
-    info "CN/private route: enabled; geolocation-!cn is allowed before CN blocks"
+    info "CN/private route: enabled; unmatched traffic uses the default direct outbound"
     info "Link length: ${#link} chars"
     echo
     echo "$link"
@@ -1547,7 +1545,7 @@ print_result() {
   info "shortId：${SHORT_ID}"
   info "节点名称：${NODE_NAME}"
   info "pbk：${REALITY_PUB}"
-  info "CN/private 阻断路由：启用；geolocation-!cn 优先放行"
+  info "CN/private 阻断路由：启用；未命中规则的流量默认 direct"
   info "链接长度：${#link} 字符"
   echo
   echo "$link"

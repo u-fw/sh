@@ -262,9 +262,9 @@ check_contains freedom.sh 'H2 is recommended, not mandatory' 'freedom.sh must tr
 check_not_contains freedom.sh '\[\[ "\$tls_ok" -ne 1 \|\| "\$h2_ok" -ne 1 \]\]' 'freedom.sh must not require H2 for SNI usability'
 check_contains freedom.sh '\{"type":"field","ip":\["geoip:private"\],"outboundTag":"block"\}' 'freedom.sh route must block private IP first'
 check_contains freedom.sh '\{"type":"field","protocol":\["bittorrent"\],"outboundTag":"block"\}' 'freedom.sh route must block bittorrent traffic through Xray'
-check_contains freedom.sh '\{"type":"field","domain":\["geosite:geolocation-!cn"\],"outboundTag":"direct"\}' 'freedom.sh route must direct known non-CN domains before CN blocks'
 check_contains freedom.sh '\{"type":"field","domain":\["geosite:cn"\],"outboundTag":"block"\}' 'freedom.sh route must block CN domains'
 check_contains freedom.sh '\{"type":"field","ip":\["geoip:cn"\],"outboundTag":"block"\}' 'freedom.sh route must block CN IP'
+check_not_contains freedom.sh '\{"type":"field","domain":\["geosite:geolocation-!cn"\],"outboundTag":"direct"\}' 'freedom.sh should rely on default direct instead of explicit geolocation-!cn direct'
 check_not_contains freedom.sh '\{"type":"field","ip":\["geoip:private","geoip:cn"\],"outboundTag":"block"\}' 'freedom.sh route must keep private and CN IP blocks ordered separately'
 
 check_not_contains freedom.sh 'sing-box|singbox|--kernel|FREEDOM_KERNEL|write_singbox_config|install_singbox_official|gen_reality_keys_singbox|choose_kernel' 'freedom.sh still contains sing-box/core-selection support'
