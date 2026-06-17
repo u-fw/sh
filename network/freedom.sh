@@ -162,11 +162,52 @@ normalize_tls_cert_mode() {
   esac
 }
 
+domain_matches_certificate_name() {
+  local domain="$1" cert_name="$2" suffix left
+  domain="${domain,,}"
+  cert_name="${cert_name,,}"
+  cert_name="${cert_name%.}"
+  domain="${domain%.}"
+
+  if [[ "$cert_name" == \*.* ]]; then
+    suffix="${cert_name#\*.}"
+    [[ "$domain" == *".${suffix}" ]] || return 1
+    left="${domain%".${suffix}"}"
+    [[ -n "$left" && "$left" != *.* ]]
+    return $?
+  fi
+
+  [[ "$domain" == "$cert_name" ]]
+}
+
+cert_covers_domain() {
+  local cert_file="$1" domain="$2" san_line name subject cn
+  san_line="$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null || true)"
+  while IFS= read -r name; do
+    name="${name#DNS:}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    [[ -n "$name" ]] || continue
+    domain_matches_certificate_name "$domain" "$name" && return 0
+  done < <(printf '%s\n' "$san_line" | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:/DNS:/p')
+
+  subject="$(openssl x509 -in "$cert_file" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
+  cn="$(printf '%s\n' "$subject" | sed -n 's/.*CN=\([^,]*\).*/\1/p' | head -n1)"
+  [[ -n "$cn" ]] && domain_matches_certificate_name "$domain" "$cn"
+}
+
 validate_tls_cert_files() {
+  local cert_pub key_pub
   [[ -r "$TLS_CERT_FILE" ]] || fatal "TLS certificate file not readable: $TLS_CERT_FILE"
   [[ -r "$TLS_KEY_FILE" ]] || fatal "TLS private key file not readable: $TLS_KEY_FILE"
   openssl x509 -in "$TLS_CERT_FILE" -noout >/dev/null 2>&1 || fatal "Invalid TLS certificate file: $TLS_CERT_FILE"
   openssl pkey -in "$TLS_KEY_FILE" -noout >/dev/null 2>&1 || fatal "Invalid TLS private key file: $TLS_KEY_FILE"
+  openssl x509 -checkend 0 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1 || fatal "TLS certificate is expired: $TLS_CERT_FILE"
+  openssl x509 -checkend 1209600 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1 || warn "TLS certificate expires within 14 days: $TLS_CERT_FILE"
+  cert_pub="$(openssl x509 -in "$TLS_CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
+  key_pub="$(openssl pkey -in "$TLS_KEY_FILE" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
+  [[ -n "$cert_pub" && -n "$key_pub" && "$cert_pub" == "$key_pub" ]] || fatal "TLS private key does not match certificate"
+  cert_covers_domain "$TLS_CERT_FILE" "$SNI" || fatal "TLS certificate does not cover SNI domain: $SNI"
 }
 
 clear_screen() {

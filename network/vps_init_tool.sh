@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Init Tool v1.0.4
+# VPS Init Tool v1.0.12
 # Debian/Ubuntu VPS bootstrap, audit and maintenance helper.
 # Scope: memory, SSH, UFW firewall, Fail2ban, DNS, logs, basic network tuning.
 # Principle: audit first, confirm before risky changes.
 
-TOOL_VERSION="1.0.4"
+TOOL_VERSION="1.0.12"
 SCRIPT_NAME="VPS Init Tool"
 BACKUP_ROOT="/root/vps-init-backups"
 SWAPFILE="/swapfile"
@@ -105,6 +105,12 @@ pause() {
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 is_systemd() { has_cmd systemctl && [ -d /run/systemd/system ]; }
 
+require_systemd() {
+  is_systemd && return 0
+  red "$(m 'systemd is required for this module; use read-only audit on non-systemd systems.' 'systemd is required for this module; use read-only audit on non-systemd systems.')"
+  return 1
+}
+
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     red "$(m "Please run as root: sudo bash $0" "请使用 root 执行：sudo bash $0")"
@@ -133,6 +139,22 @@ load_os_release() {
   else
     ID="unknown"; PRETTY_NAME="unknown"
   fi
+}
+
+package_manager_detect() {
+  if has_cmd apt-get; then echo "apt"; return 0; fi
+  if has_cmd dnf; then echo "dnf"; return 0; fi
+  if has_cmd yum; then echo "yum"; return 0; fi
+  if has_cmd apk; then echo "apk"; return 0; fi
+  echo "unknown"
+}
+
+os_support_level() {
+  load_os_release
+  case "${ID:-}" in
+    debian|ubuntu) echo "full" ;;
+    *) echo "audit-only" ;;
+  esac
 }
 
 require_debian_family() {
@@ -206,6 +228,23 @@ normalize_password_policy() {
     yes|YES|Yes|y|Y) printf 'yes\n' ;;
     *) return 1 ;;
   esac
+}
+
+valid_permit_root_login() {
+  case "${1:-}" in
+    yes|prohibit-password|without-password|forced-commands-only|no) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_allow_users_value() {
+  local value="${1:-}" item count=0
+  [ -n "$value" ] || return 0
+  for item in $value; do
+    [[ "$item" =~ ^[A-Za-z0-9._@%*?+-]+$ ]] || return 1
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ]
 }
 
 make_backup_dir() { mkdir -p "$BACKUP_ROOT"; }
@@ -361,6 +400,21 @@ valid_ip_literal() {
   valid_ipv4_literal "$1" || valid_ipv6_literal "$1"
 }
 
+valid_ip_or_cidr() {
+  local value="$1" addr prefix
+  if [[ "$value" == */* ]]; then
+    addr="${value%/*}"
+    prefix="${value##*/}"
+    if [[ "$addr" == *:* ]]; then
+      valid_ipv6_literal "$addr" && valid_uint_range "$prefix" 0 128
+    else
+      valid_ipv4_literal "$addr" && valid_uint_range "$prefix" 0 32
+    fi
+    return $?
+  fi
+  valid_ip_literal "$value"
+}
+
 valid_ip_list() {
   local list="$1" ip count=0
   for ip in $list; do
@@ -504,6 +558,103 @@ show_system_status() {
   listening_ports_compact | print_block || true
 }
 
+print_recommended_workflow() {
+  local support="${1:-$(os_support_level)}"
+  section "$(m 'Recommended workflow' 'Recommended workflow')"
+  if [ "$support" = "full" ]; then
+    status_info "1. bash vps_init_tool.sh --preflight"
+    status_info "2. sudo bash vps_init_tool.sh --audit"
+    status_info "3. sudo bash vps_init_tool.sh --baseline --yes"
+    status_info "4. sudo bash vps_init_tool.sh --ssh-audit"
+    status_info "5. sudo bash vps_init_tool.sh --ufw-audit"
+    status_info "6. sudo bash vps_init_tool.sh --ufw-cf-sync --ports 80,443 --yes"
+    status_info "$(m 'Apply SSH/UFW/Fail2ban changes only after confirming current SSH access is protected.' 'Apply SSH/UFW/Fail2ban changes only after confirming current SSH access is protected.')"
+  else
+    status_warn "$(m 'Do not run mutating commands on this OS. Use read-only checks only:' 'Do not run mutating commands on this OS. Use read-only checks only:')"
+    status_info "bash vps_init_tool.sh --compat"
+    status_info "bash vps_init_tool.sh --preflight"
+    status_info "$(m 'For full automation, use a Debian/Ubuntu VPS or port the package/service/firewall modules first.' 'For full automation, use a Debian/Ubuntu VPS or port the package/service/firewall modules first.')"
+  fi
+}
+
+compatibility_report() {
+  local support pm
+  LANG_MODE="$(normalize_lang "$LANG_MODE")"
+  load_os_release
+  support="$(os_support_level)"
+  pm="$(package_manager_detect)"
+
+  title "$(m 'Compatibility report' '兼容性报告')"
+  kv "OS" "${PRETTY_NAME:-unknown}"
+  kv "ID" "${ID:-unknown}"
+  kv "Package manager" "$pm"
+  kv "Support level" "$support"
+
+  echo
+  if [ "$support" = "full" ]; then
+    status_ok "$(m 'Full support: Debian/Ubuntu family with apt-get.' '完整支持：Debian/Ubuntu 系并具备 apt-get。')"
+  else
+    status_warn "$(m 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.' '仅审计支持：Debian/Ubuntu 之外的系统会阻止修改型模块。')"
+  fi
+
+  if is_systemd; then
+    status_ok "$(m 'systemd detected; service modules can operate.' '已检测到 systemd；服务类模块可工作。')"
+  else
+    status_warn "$(m 'systemd not detected; service reload/start modules may be unavailable.' '未检测到 systemd；服务重载/启动模块可能不可用。')"
+  fi
+
+  has_cmd sshd && status_ok "sshd: available" || status_warn "sshd: missing"
+  has_cmd ufw && status_ok "ufw: available" || status_info "ufw: missing; install module requires full support"
+  has_cmd fail2ban-client && status_ok "fail2ban: available" || status_info "fail2ban: missing; install module requires full support"
+  has_cmd sysctl && status_ok "sysctl: available" || status_warn "sysctl: missing"
+  has_cmd ss && status_ok "ss: available" || status_info "ss: missing; port diagnostics are reduced"
+
+  echo
+  status_info "$(m 'This report is read-only. Use --preflight for broader environment checks.' '此报告只读。可使用 --preflight 查看更完整环境预检。')"
+  print_recommended_workflow "$support"
+}
+
+doctor_report() {
+  local support pm root_state systemd_state
+  LANG_MODE="$(normalize_lang "$LANG_MODE")"
+  load_os_release
+  support="$(os_support_level)"
+  pm="$(package_manager_detect)"
+  root_state="$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo yes || echo no)"
+  systemd_state="$(is_systemd && echo yes || echo no)"
+
+  title "$(m 'Doctor report' 'Doctor report')"
+  kv "Tool" "$SCRIPT_NAME $TOOL_VERSION"
+  kv "OS" "${PRETTY_NAME:-unknown}"
+  kv "Support level" "$support"
+  kv "Package manager" "$pm"
+  kv "Root" "$root_state"
+  kv "Systemd" "$systemd_state"
+
+  section "$(m 'Read-only module readiness' 'Read-only module readiness')"
+  [ "$support" = "full" ] && status_ok "OS support: full" || status_warn "OS support: audit-only"
+  [ "$pm" = "apt" ] && status_ok "Package installs: apt available" || status_warn "Package installs: unavailable for this script"
+  [ "$systemd_state" = "yes" ] && status_ok "Service management: systemd available" || status_warn "Service management: systemd unavailable"
+  has_cmd sshd && status_ok "SSH audit: sshd available" || status_warn "SSH audit: sshd missing"
+  has_cmd ufw && status_ok "UFW audit: ufw available" || status_info "UFW audit: ufw missing"
+  has_cmd fail2ban-client && status_ok "Fail2ban audit: fail2ban-client available" || status_info "Fail2ban audit: fail2ban-client missing"
+  has_cmd resolvectl && status_ok "DNS audit: resolvectl available" || status_info "DNS audit: resolvectl missing; /etc/resolv.conf still checked"
+  has_cmd journalctl && status_ok "Logs audit: journalctl available" || status_info "Logs audit: journalctl missing; /var/log still checked"
+  has_cmd ss && status_ok "Port diagnostics: ss available" || status_info "Port diagnostics: ss missing"
+
+  section "$(m 'Recommended commands' 'Recommended commands')"
+  status_info "bash vps_init_tool.sh --compat"
+  status_info "bash vps_init_tool.sh --preflight"
+  if [ "$root_state" = "yes" ]; then
+    status_info "bash vps_init_tool.sh --audit"
+    status_info "bash vps_init_tool.sh --baseline --yes"
+  else
+    status_info "sudo bash vps_init_tool.sh --audit"
+    status_info "sudo bash vps_init_tool.sh --baseline --yes"
+  fi
+  print_recommended_workflow "$support"
+}
+
 preflight_check() {
   LANG_MODE="$(normalize_lang "$LANG_MODE")"
   load_os_release
@@ -513,6 +664,8 @@ preflight_check() {
   kv "User" "$(id -un 2>/dev/null || echo unknown)"
   kv "Root" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo yes || echo no)"
   kv "OS" "${PRETTY_NAME:-unknown}"
+  kv "Support level" "$(os_support_level)"
+  kv "Package manager" "$(package_manager_detect)"
   kv "Kernel" "$(uname -r 2>/dev/null || echo unknown)"
   kv "Arch" "$(uname -m 2>/dev/null || echo unknown)"
   kv "Memory" "$(get_mem_mb 2>/dev/null || echo unknown) MB"
@@ -544,6 +697,7 @@ preflight_check() {
   if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
     status_info "$(m 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.' '执行 --audit、--baseline、SSH、UFW、DNS 和服务修改时请使用 sudo/root。')"
   fi
+  print_recommended_workflow "$(os_support_level)"
 }
 
 memory_report() {
@@ -1131,12 +1285,14 @@ ssh_write_hardening() {
   port="$(input_default "$(m 'New SSH port' '新的 SSH 端口')" "$(current_ssh_port_guess)")"
   valid_port "$port" || { red "$(m 'Invalid SSH port. Use 1-65535.' 'SSH 端口无效，请使用 1-65535。')"; return 1; }
   allow_user="$(input_default "$(m 'AllowUsers value, empty means do not set' 'AllowUsers 值，留空表示不设置')" "")"
+  valid_allow_users_value "$allow_user" || { red "$(m 'Invalid AllowUsers value. Use space-separated usernames or user@host patterns only.' 'Invalid AllowUsers value. Use space-separated usernames or user@host patterns only.')"; return 1; }
   password_policy="$(normalize_password_policy "$(input_default "$(m 'PasswordAuthentication policy: keep/no/yes' 'PasswordAuthentication 策略：keep/no/yes')" "keep")")" || { red "$(m 'Invalid PasswordAuthentication policy. Use keep, no, or yes.' 'PasswordAuthentication 策略无效，请使用 keep、no 或 yes。')"; return 1; }
   if [ "$password_policy" = "yes" ]; then
     yellow "$(m 'Enabling SSH password login is usually not recommended.' '通常不建议开启 SSH 密码登录。')"
     confirm_yes "$(m 'Explicitly enable SSH password login?' '明确开启 SSH 密码登录？')" || return 0
   fi
   permit_root="$(input_default "PermitRootLogin" "prohibit-password")"
+  valid_permit_root_login "$permit_root" || { red "$(m 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.' 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.')"; return 1; }
   strict_forwarding="$(input_yes_no "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding?' '关闭 Agent/X11/Tunnel/Gateway 转发？')" "yes")" || return 1
   allow_tcp="$(input_yes_no "$(m 'Allow TCP forwarding for ssh -L/-R/-D?' '允许 TCP 转发用于 ssh -L/-R/-D？')" "yes")" || return 1
   if [ "$password_policy" = "no" ]; then
@@ -1323,6 +1479,7 @@ ufw_allow_ip_to_port() {
   if [ -z "$ip" ] || [ -z "$port" ]; then red "$(m 'Source and port are required.' '来源和端口不能为空。')"; return 1; fi
   valid_port "$port" || { red "$(m 'Invalid destination port. Use 1-65535.' '目标端口无效，请使用 1-65535。')"; return 1; }
   valid_proto "$proto" || { red "$(m 'Invalid protocol. Use tcp or udp.' '协议无效，请使用 tcp 或 udp。')"; return 1; }
+  valid_ip_or_cidr "$ip" || { red "$(m 'Invalid source IP/CIDR. Use an IPv4/IPv6 address or CIDR such as 203.0.113.0/24.' 'Invalid source IP/CIDR. Use an IPv4/IPv6 address or CIDR such as 203.0.113.0/24.')"; return 1; }
   ufw allow from "$ip" to any port "$port" proto "$proto" comment "restricted-$port"
   ufw status numbered
 }
@@ -1548,6 +1705,7 @@ fail2ban_audit() {
 }
 
 fail2ban_setup_sshd() {
+  require_systemd || return 1
   apt_install fail2ban
   mkdir -p /etc/fail2ban/jail.d
   local jail_file="/etc/fail2ban/jail.d/sshd-vps-init.local"
@@ -1688,7 +1846,7 @@ dns_restore_resolved_backup() {
 
 dns_apply_resolved() {
   local dns fallback config_file="/etc/systemd/resolved.conf.d/10-vps-init-dns.conf" config_backup=""
-  is_systemd || { red "$(m 'systemd not detected.' '未检测到 systemd。')"; return 1; }
+  require_systemd || return 1
   systemctl list-unit-files | grep -q '^systemd-resolved.service' || { red "systemd-resolved not found."; return 1; }
   dns="$(input_default "$(m 'Primary DNS servers, space-separated' '主 DNS，空格分隔')" "1.1.1.1 8.8.8.8")"
   fallback="$(input_default "$(m 'Fallback DNS servers, space-separated' '备用 DNS，空格分隔')" "1.0.0.1 8.8.4.4")"
@@ -1777,7 +1935,7 @@ logs_audit() {
 }
 
 logs_limit_journald() {
-  is_systemd || { red "$(m 'systemd not detected.' '未检测到 systemd。')"; return 1; }
+  require_systemd || return 1
   local system_max runtime_max retention
   local config_file="/etc/systemd/journald.conf.d/99-vps-init-size-limit.conf" config_backup=""
   system_max="$(input_default "SystemMaxUse" "200M")"
@@ -1806,7 +1964,7 @@ EOF2
 }
 
 logs_vacuum() {
-  is_systemd || { red "$(m 'systemd not detected.' '未检测到 systemd。')"; return 1; }
+  require_systemd || return 1
   local size
   size="$(input_default "$(m 'Vacuum journal down to size' '清理 journald 到指定大小')" "200M")"
   valid_systemd_size "$size" || { red "$(m 'Invalid journal vacuum size. Use values such as 200M or 1G.' 'journald 清理大小无效。请使用 200M 或 1G 等格式。')"; return 1; }
@@ -1906,11 +2064,19 @@ Usage:
   bash vps_init_tool.sh [options] [command]
 
 Commands:
+  --doctor          Show read-only summary diagnostics and recommended commands.
+  --compat          Show read-only OS/module compatibility report; does not require root.
   --preflight        Run read-only checks; does not require root.
   --audit            Run full read-only environment audit.
   --status           Show system status.
+  --memory-audit     Show memory/swap/ZRAM audit.
+  --ssh-audit        Show SSH hardening audit.
   --baseline         Run the low-risk baseline non-interactively.
   --ufw-audit        Show UFW/firewall audit.
+  --fail2ban-audit   Show Fail2ban audit.
+  --dns-audit        Show DNS audit.
+  --logs-audit       Show log/journald audit.
+  --list-backups     List configuration backups created by this tool.
   --ufw-cf-sync      Incrementally sync Cloudflare allow rules for web ports.
   --version          Print version.
   --help             Show this help.
@@ -1960,8 +2126,9 @@ handle_cli() {
         if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then red "Missing value for --ports."; show_help; exit 2; fi
         shift
         UFW_CF_PORTS="$1"
+        ufw_parse_cloudflare_ports "$UFW_CF_PORTS" || { red "Invalid --ports value: $UFW_CF_PORTS"; show_help; exit 2; }
         ;;
-      --preflight|--audit|--status|--baseline|--ufw-audit|--ufw-cf-sync)
+      --doctor|--compat|--preflight|--audit|--status|--memory-audit|--ssh-audit|--baseline|--ufw-audit|--fail2ban-audit|--dns-audit|--logs-audit|--list-backups|--ufw-cf-sync)
         [ -z "$cmd" ] || { red "Only one command may be specified."; show_help; exit 2; }
         cmd="$1"
         ;;
@@ -1978,6 +2145,8 @@ handle_cli() {
   NONINTERACTIVE=1
   LANG_MODE="$(normalize_lang "$LANG_MODE")"
   case "$cmd" in
+    --doctor) doctor_report; exit 0 ;;
+    --compat) compatibility_report; exit 0 ;;
     --preflight) preflight_check; exit 0 ;;
   esac
   need_root
@@ -1990,8 +2159,14 @@ handle_cli() {
     case "$cmd" in
       --audit) audit_all ;;
       --status) show_system_status ;;
+      --memory-audit) memory_report ;;
+      --ssh-audit) ssh_audit ;;
       --baseline) ASSUME_YES=1; low_risk_baseline "cli" ;;
       --ufw-audit) ufw_audit ;;
+      --fail2ban-audit) fail2ban_audit ;;
+      --dns-audit) dns_audit ;;
+      --logs-audit) logs_audit ;;
+      --list-backups) list_backups ;;
       --ufw-cf-sync) ufw_sync_cloudflare_web ;;
     esac
   )
