@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Init Tool v1.0.12
+# VPS Init Tool v1.0.14
 # Debian/Ubuntu VPS bootstrap, audit and maintenance helper.
 # Scope: memory, SSH, UFW firewall, Fail2ban, DNS, logs, basic network tuning.
 # Principle: audit first, confirm before risky changes.
 
-TOOL_VERSION="1.0.12"
+TOOL_VERSION="1.0.14"
 SCRIPT_NAME="VPS Init Tool"
 BACKUP_ROOT="/root/vps-init-backups"
 SWAPFILE="/swapfile"
@@ -29,14 +29,14 @@ BACKUP_LAST_PATH=""
 # ---------- i18n / UI ----------
 normalize_lang() {
   case "${1:-}" in
-    zh|zh-cn|zh_CN|cn|CN|中文) echo "cn" ;;
+    zh|zh-cn|zh_CN|cn|CN|chinese|Chinese) echo "cn" ;;
     en|EN|english|English) echo "en" ;;
     *) echo "en" ;;
   esac
 }
 
 m() {
-  # m "English" "中文"
+  # m "English" "Chinese"
   if [ "${LANG_MODE:-en}" = "cn" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi
 }
 
@@ -99,7 +99,7 @@ clear_screen() { clear 2>/dev/null || true; }
 
 pause() {
   echo
-  read -r -p "$(m 'Press Enter to continue...' '按 Enter 继续...')" _ || true
+  read -r -p "$(m 'Press Enter to continue...' 'Press Enter to continue...')" _ || true
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -113,7 +113,7 @@ require_systemd() {
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    red "$(m "Please run as root: sudo bash $0" "请使用 root 执行：sudo bash $0")"
+    red "$(m "Please run as root: sudo bash $0" "Please run as root: sudo bash $0")"
     exit 1
   fi
 }
@@ -121,12 +121,12 @@ need_root() {
 choose_language() {
   LANG_MODE="$(normalize_lang "$LANG_MODE")"
   if [ -t 0 ] && [ -z "${VPS_INIT_LANG:-}" ]; then
-    echo "Language / 语言:"
+    echo "Language / language:"
     echo "1) English"
-    echo "2) 中文"
+    echo "2) Chinese"
     read -r -p "Choose [1/2, default 1]: " ans || true
     case "$ans" in
-      2|cn|CN|zh|中文) LANG_MODE="cn" ;;
+      2|cn|CN|zh|chinese|Chinese) LANG_MODE="cn" ;;
       *) LANG_MODE="en" ;;
     esac
   fi
@@ -162,7 +162,7 @@ require_debian_family() {
   case "${ID:-}" in
     debian|ubuntu) return 0 ;;
     *)
-      red "$(m "This script is intended for Debian/Ubuntu family systems. Detected: ${PRETTY_NAME:-unknown}" "此脚本面向 Debian/Ubuntu 系系统。检测到：${PRETTY_NAME:-unknown}")"
+      red "$(m "This script is intended for Debian/Ubuntu family systems. Detected: ${PRETTY_NAME:-unknown}" "This script is intended for Debian/Ubuntu family systems. Detected: ${PRETTY_NAME:-unknown}")"
       exit 1
       ;;
   esac
@@ -172,17 +172,17 @@ confirm_yes() {
   local prompt="$1" ans
   case "${ASSUME_YES:-0}" in
     1|yes|YES|true|TRUE)
-      status_info "$(m "Auto-confirmed: $prompt" "已自动确认：$prompt")"
+      status_info "$(m "Auto-confirmed: $prompt" "Auto-confirmed: $prompt")"
       return 0
       ;;
   esac
   echo
   yellow "$prompt"
   if [ "${NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
-    status_warn "$(m 'Confirmation required; use --yes or VPS_INIT_YES=1 for non-interactive execution.' '需要确认；非交互执行请使用 --yes 或 VPS_INIT_YES=1。')"
+    status_warn "$(m 'Confirmation required; use --yes or VPS_INIT_YES=1 for non-interactive execution.' 'Confirmation required; use --yes or VPS_INIT_YES=1 for non-interactive execution.')"
     return 1
   fi
-  read -r -p "$(m 'Type YES to continue: ' '输入 YES 继续：')" ans || true
+  read -r -p "$(m 'Type YES to continue: ' 'Type YES to continue: ')" ans || true
   [ "$ans" = "YES" ]
 }
 
@@ -286,7 +286,7 @@ apt_get_retry() {
     [ "$errexit_was_set" -eq 1 ] && set -e
     [ "$rc" -eq 0 ] && return 0
     [ "$attempt" -ge "${APT_RETRIES:-3}" ] && break
-    yellow "$(m "apt-get $* failed with rc=$rc; retrying in ${delay}s..." "apt-get $* 失败，rc=$rc；${delay}s 后重试...")"
+    yellow "$(m "apt-get $* failed with rc=$rc; retrying in ${delay}s..." "apt-get $* failed with rc=$rc; retrying in ${delay}s...")"
     log_action "apt" "command=$* attempt=$attempt rc=$rc"
     sleep "$delay"
     attempt=$((attempt + 1))
@@ -496,8 +496,8 @@ recommend_swappiness() {
 apply_memory_sysctl() {
   local swappiness="${1:-10}" vfs_cache_pressure="${2:-50}"
   local config_file="/etc/sysctl.d/99-memory-tuning.conf" config_backup=""
-  valid_uint_range "$swappiness" 0 200 || { red "$(m 'Invalid vm.swappiness. Use 0-200.' 'vm.swappiness 无效，请使用 0-200。')"; return 1; }
-  valid_uint_range "$vfs_cache_pressure" 0 1000 || { red "$(m 'Invalid vm.vfs_cache_pressure. Use 0-1000.' 'vm.vfs_cache_pressure 无效，请使用 0-1000。')"; return 1; }
+  valid_uint_range "$swappiness" 0 200 || { red "$(m 'Invalid vm.swappiness. Use 0-200.' 'Invalid vm.swappiness. Use 0-200.')"; return 1; }
+  valid_uint_range "$vfs_cache_pressure" 0 1000 || { red "$(m 'Invalid vm.vfs_cache_pressure. Use 0-1000.' 'Invalid vm.vfs_cache_pressure. Use 0-1000.')"; return 1; }
   backup_path "$config_file" >/dev/null || return 1
   config_backup="$BACKUP_LAST_PATH"
   cat > "$config_file" <<EOF2 || return 1
@@ -505,7 +505,7 @@ vm.swappiness=$swappiness
 vm.vfs_cache_pressure=$vfs_cache_pressure
 EOF2
   if ! sysctl -p /etc/sysctl.d/99-memory-tuning.conf >/dev/null; then
-    red "$(m 'Failed to apply memory sysctl settings. Restoring the previous configuration.' '应用内存 sysctl 设置失败，正在恢复之前的配置。')"
+    red "$(m 'Failed to apply memory sysctl settings. Restoring the previous configuration.' 'Failed to apply memory sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
     if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
     return 1
@@ -514,7 +514,7 @@ EOF2
 
 # ---------- system / audit ----------
 install_basic_tools() {
-  blue "$(m 'Installing basic tools...' '正在安装基础工具...')"
+  blue "$(m 'Installing basic tools...' 'Installing basic tools...')"
   apt_install \
     curl wget ca-certificates gnupg lsb-release apt-transport-https \
     vim nano less unzip zip tar gzip xz-utils zstd \
@@ -527,12 +527,12 @@ install_basic_tools() {
     systemctl enable cron >/dev/null 2>&1 || true
     systemctl enable sysstat >/dev/null 2>&1 || true
   fi
-  green "$(m 'Basic tools installed.' '基础工具安装完成。')"
+  green "$(m 'Basic tools installed.' 'Basic tools installed.')"
 }
 
 show_system_status() {
   load_os_release
-  title "$(m 'System Status' '系统状态')"
+  title "$(m 'System Status' 'System Status')"
   kv "Tool" "$SCRIPT_NAME $TOOL_VERSION"
   kv "Language" "$LANG_MODE"
   kv "OS" "${PRETTY_NAME:-unknown}"
@@ -541,20 +541,20 @@ show_system_status() {
   kv "Hostname" "$(hostname)"
   kv "Systemd" "$(is_systemd && echo yes || echo no)"
 
-  section "$(m 'Memory / Swap' '内存 / Swap')"
+  section "$(m 'Memory / Swap' 'Memory / Swap')"
   free -h | print_block || true
   echo
   swapon --show --output=NAME,TYPE,SIZE,USED,PRIO 2>/dev/null | print_block || swapon --show | print_block || true
 
-  section "$(m 'Disk' '磁盘')"
+  section "$(m 'Disk' 'Disk')"
   df -hT / | print_block || true
 
-  section "$(m 'Network / BBR' '网络 / BBR')"
+  section "$(m 'Network / BBR' 'Network / BBR')"
   kv "tcp_congestion_control" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
   kv "default_qdisc" "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
   kv "available algorithms" "$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || echo unknown)"
 
-  section "$(m 'Listening ports' '监听端口')"
+  section "$(m 'Listening ports' 'Listening ports')"
   listening_ports_compact | print_block || true
 }
 
@@ -584,7 +584,7 @@ compatibility_report() {
   support="$(os_support_level)"
   pm="$(package_manager_detect)"
 
-  title "$(m 'Compatibility report' '兼容性报告')"
+  title "$(m 'Compatibility report' 'Compatibility report')"
   kv "OS" "${PRETTY_NAME:-unknown}"
   kv "ID" "${ID:-unknown}"
   kv "Package manager" "$pm"
@@ -592,15 +592,15 @@ compatibility_report() {
 
   echo
   if [ "$support" = "full" ]; then
-    status_ok "$(m 'Full support: Debian/Ubuntu family with apt-get.' '完整支持：Debian/Ubuntu 系并具备 apt-get。')"
+    status_ok "$(m 'Full support: Debian/Ubuntu family with apt-get.' 'Full support: Debian/Ubuntu family with apt-get.')"
   else
-    status_warn "$(m 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.' '仅审计支持：Debian/Ubuntu 之外的系统会阻止修改型模块。')"
+    status_warn "$(m 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.' 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.')"
   fi
 
   if is_systemd; then
-    status_ok "$(m 'systemd detected; service modules can operate.' '已检测到 systemd；服务类模块可工作。')"
+    status_ok "$(m 'systemd detected; service modules can operate.' 'systemd detected; service modules can operate.')"
   else
-    status_warn "$(m 'systemd not detected; service reload/start modules may be unavailable.' '未检测到 systemd；服务重载/启动模块可能不可用。')"
+    status_warn "$(m 'systemd not detected; service reload/start modules may be unavailable.' 'systemd not detected; service reload/start modules may be unavailable.')"
   fi
 
   has_cmd sshd && status_ok "sshd: available" || status_warn "sshd: missing"
@@ -610,7 +610,7 @@ compatibility_report() {
   has_cmd ss && status_ok "ss: available" || status_info "ss: missing; port diagnostics are reduced"
 
   echo
-  status_info "$(m 'This report is read-only. Use --preflight for broader environment checks.' '此报告只读。可使用 --preflight 查看更完整环境预检。')"
+  status_info "$(m 'This report is read-only. Use --preflight for broader environment checks.' 'This report is read-only. Use --preflight for broader environment checks.')"
   print_recommended_workflow "$support"
 }
 
@@ -659,7 +659,7 @@ preflight_check() {
   LANG_MODE="$(normalize_lang "$LANG_MODE")"
   load_os_release
 
-  title "$(m 'VPS init preflight' 'VPS 初始化预检')"
+  title "$(m 'VPS init preflight' 'VPS init preflight')"
   kv "Time" "$(date '+%F %T %Z' 2>/dev/null || echo unknown)"
   kv "User" "$(id -un 2>/dev/null || echo unknown)"
   kv "Root" "$([ "$(id -u 2>/dev/null || echo 1)" -eq 0 ] && echo yes || echo no)"
@@ -673,29 +673,29 @@ preflight_check() {
 
   echo
   case "${ID:-}" in
-    debian|ubuntu) status_ok "$(m 'Debian/Ubuntu family detected.' '检测到 Debian/Ubuntu 系统。')" ;;
-    *) status_bad "$(m "Unsupported OS for this script: ${PRETTY_NAME:-unknown}" "此脚本不支持当前系统：${PRETTY_NAME:-unknown}")" ;;
+    debian|ubuntu) status_ok "$(m 'Debian/Ubuntu family detected.' 'Debian/Ubuntu family detected.')" ;;
+    *) status_bad "$(m "Unsupported OS for this script: ${PRETTY_NAME:-unknown}" "Unsupported OS for this script: ${PRETTY_NAME:-unknown}")" ;;
   esac
 
-  if has_cmd apt-get; then status_ok "apt-get"; else status_bad "$(m 'apt-get not found.' '未找到 apt-get。')"; fi
-  if has_cmd systemctl && [ -d /run/systemd/system ]; then status_ok "systemd"; else status_warn "$(m 'systemd is not fully available; service operations may fail.' 'systemd 不完整可用，服务操作可能失败。')"; fi
-  if has_cmd sudo; then status_ok "sudo"; else status_info "$(m 'sudo not found; run as root when applying changes.' '未找到 sudo；应用修改时请使用 root。')"; fi
-  if has_cmd curl; then status_ok "curl"; else status_warn "$(m 'curl missing; baseline can install it.' '缺少 curl；baseline 可安装。')"; fi
-  if [ -d /etc/ssl/certs ]; then status_ok "ca-certificates"; else status_warn "$(m 'Certificate store not found; ensure HTTPS downloads work.' '未找到证书目录；请确认 HTTPS 下载可用。')"; fi
+  if has_cmd apt-get; then status_ok "apt-get"; else status_bad "$(m 'apt-get not found.' 'apt-get not found.')"; fi
+  if has_cmd systemctl && [ -d /run/systemd/system ]; then status_ok "systemd"; else status_warn "$(m 'systemd is not fully available; service operations may fail.' 'systemd is not fully available; service operations may fail.')"; fi
+  if has_cmd sudo; then status_ok "sudo"; else status_info "$(m 'sudo not found; run as root when applying changes.' 'sudo not found; run as root when applying changes.')"; fi
+  if has_cmd curl; then status_ok "curl"; else status_warn "$(m 'curl missing; baseline can install it.' 'curl missing; baseline can install it.')"; fi
+  if [ -d /etc/ssl/certs ]; then status_ok "ca-certificates"; else status_warn "$(m 'Certificate store not found; ensure HTTPS downloads work.' 'Certificate store not found; ensure HTTPS downloads work.')"; fi
 
   if has_cmd sshd; then
-    status_ok "$(m "sshd detected; effective port(s): $(current_ssh_ports)" "检测到 sshd；有效端口：$(current_ssh_ports)")"
+    status_ok "$(m "sshd detected; effective port(s): $(current_ssh_ports)" "sshd detected; effective port(s): $(current_ssh_ports)"): $(current_ssh_ports)")")"
   else
-    status_warn "$(m 'sshd not found; SSH hardening/audit will be unavailable.' '未找到 sshd；SSH 加固/审计不可用。')"
+    status_warn "$(m 'sshd not found; SSH hardening/audit will be unavailable.' 'sshd not found; SSH hardening/audit will be unavailable.')"
   fi
 
-  if has_cmd ufw; then status_info "$(m 'UFW is installed.' 'UFW 已安装。')"; else status_info "$(m 'UFW is not installed; firewall module can install it.' 'UFW 未安装；防火墙模块可安装。')"; fi
-  if has_cmd fail2ban-client; then status_info "$(m 'Fail2ban is installed.' 'Fail2ban 已安装。')"; else status_info "$(m 'Fail2ban is not installed; fail2ban module can install it.' 'Fail2ban 未安装；Fail2ban 模块可安装。')"; fi
+  if has_cmd ufw; then status_info "$(m 'UFW is installed.' 'UFW is installed.')"; else status_info "$(m 'UFW is not installed; firewall module can install it.' 'UFW is not installed; firewall module can install it.')"; fi
+  if has_cmd fail2ban-client; then status_info "$(m 'Fail2ban is installed.' 'Fail2ban is installed.')"; else status_info "$(m 'Fail2ban is not installed; fail2ban module can install it.' 'Fail2ban is not installed; fail2ban module can install it.')"; fi
 
   echo
-  status_info "$(m 'Preflight is read-only. No settings were changed.' '预检是只读的，没有修改任何设置。')"
+  status_info "$(m 'Preflight is read-only. No settings were changed.' 'Preflight is read-only. No settings were changed.')"
   if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
-    status_info "$(m 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.' '执行 --audit、--baseline、SSH、UFW、DNS 和服务修改时请使用 sudo/root。')"
+    status_info "$(m 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.' 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.')"
   fi
   print_recommended_workflow "$(os_support_level)"
 }
@@ -709,7 +709,7 @@ memory_report() {
   swap_lines="$({ swapon --show --noheadings 2>/dev/null || true; } | wc -l | awk '{print $1}')"
   zram_active="$(swapon --show --noheadings 2>/dev/null | awk '$1 ~ /zram/ {print $1}' | paste -sd, - || true)"
 
-  section "$(m 'Memory audit' '内存审计')"
+  section "$(m 'Memory audit' 'Memory audit')"
   kv "RAM" "${mem_mb} MB"
   kv "Current swappiness" "$(sysctl -n vm.swappiness 2>/dev/null || echo unknown)"
   kv "Current vfs_cache_pressure" "$(sysctl -n vm.vfs_cache_pressure 2>/dev/null || echo unknown)"
@@ -717,46 +717,46 @@ memory_report() {
   kv "Active ZRAM" "${zram_active:-none}"
 
   echo
-  status_info "$(m "Recommended swapfile: $swap_rec" "建议 swapfile：$swap_rec")"
-  status_info "$(m "Recommended ZRAM: $zram_rec" "建议 ZRAM：$zram_rec")"
-  status_info "$(m "Recommended swappiness: $swappiness_rec; vfs_cache_pressure: 50" "建议 swappiness：$swappiness_rec；vfs_cache_pressure：50")"
+  status_info "$(m "Recommended swapfile: $swap_rec" "Recommended swapfile: $swap_rec")"
+  status_info "$(m "Recommended ZRAM: $zram_rec" "Recommended ZRAM: $zram_rec")"
+  status_info "$(m "Recommended swappiness: $swappiness_rec; vfs_cache_pressure: 50" "Recommended swappiness: $swappiness_rec; vfs_cache_pressure: 50")"
 
   echo
-  muted "  $(m 'Current free -h:' '当前 free -h：')"
+  muted "  $(m 'Current free -h:' 'Current free -h:')"
   free -h | print_block || true
   echo
-  muted "  $(m 'Current swapon:' '当前 swapon：')"
+  muted "  $(m 'Current swapon:' 'Current swapon:')"
   swapon --show --output=NAME,TYPE,SIZE,USED,PRIO 2>/dev/null | print_block || swapon --show | print_block || true
 
   echo
   if [ "$mem_mb" -le 2048 ]; then
-    status_warn "$(m 'Small VPS profile: ZRAM + swapfile is recommended.' '小内存 VPS：建议 ZRAM + swapfile 组合。')"
+    status_warn "$(m 'Small VPS profile: ZRAM + swapfile is recommended.' 'Small VPS profile: ZRAM + swapfile is recommended.')"
   elif [ "$mem_mb" -le 8192 ]; then
-    status_info "$(m 'Medium VPS profile: swapfile recommended; ZRAM optional.' '中等内存 VPS：建议保留 swapfile，ZRAM 可选。')"
+    status_info "$(m 'Medium VPS profile: swapfile recommended; ZRAM optional.' 'Medium VPS profile: swapfile recommended; ZRAM optional.')"
   else
-    status_info "$(m 'Large VPS profile: usually swapfile only; ZRAM optional.' '大内存服务器：通常保留 swapfile 兜底即可，ZRAM 可选。')"
+    status_info "$(m 'Large VPS profile: usually swapfile only; ZRAM optional.' 'Large VPS profile: usually swapfile only; ZRAM optional.')"
   fi
 }
 
 # ---------- memory ----------
 setup_swapfile() {
   local size swappiness vfs_cache_pressure mb
-  size="$(input_default "$(m 'Swapfile size; use 0 to skip' 'Swapfile 大小；输入 0 跳过')" "$(recommend_swap_size)")"
-  case "$size" in 0|0M|0m|0G|0g) yellow "$(m 'Swapfile skipped.' '已跳过 swapfile。')"; return 0 ;; esac
-  valid_size_mb_gb "$size" || { red "$(m 'Invalid swapfile size. Use a positive value such as 512M, 2G, or 2048.' 'Swapfile 大小无效。请使用 512M、2G 或 2048 等正数格式。')"; return 1; }
-  mb="$(parse_size_to_mb "$size")" || { red "$(m 'Unable to parse swapfile size.' '无法解析 Swapfile 大小。')"; return 1; }
+  size="$(input_default "$(m 'Swapfile size; use 0 to skip' 'Swapfile size; use 0 to skip')" "$(recommend_swap_size)")"
+  case "$size" in 0|0M|0m|0G|0g) yellow "$(m 'Swapfile skipped.' 'Swapfile skipped.')"; return 0 ;; esac
+  valid_size_mb_gb "$size" || { red "$(m 'Invalid swapfile size. Use a positive value such as 512M, 2G, or 2048.' 'Invalid swapfile size. Use a positive value such as 512M, 2G, or 2048.')"; return 1; }
+  mb="$(parse_size_to_mb "$size")" || { red "$(m 'Unable to parse swapfile size.' 'Unable to parse swapfile size.')"; return 1; }
   swappiness="$(input_default "vm.swappiness" "$(recommend_swappiness)")"
   vfs_cache_pressure="$(input_default "vm.vfs_cache_pressure" "50")"
-  valid_uint_range "$swappiness" 0 200 || { red "$(m 'Invalid vm.swappiness. Use 0-200.' 'vm.swappiness 无效，请使用 0-200。')"; return 1; }
-  valid_uint_range "$vfs_cache_pressure" 0 1000 || { red "$(m 'Invalid vm.vfs_cache_pressure. Use 0-1000.' 'vm.vfs_cache_pressure 无效，请使用 0-1000。')"; return 1; }
+  valid_uint_range "$swappiness" 0 200 || { red "$(m 'Invalid vm.swappiness. Use 0-200.' 'Invalid vm.swappiness. Use 0-200.')"; return 1; }
+  valid_uint_range "$vfs_cache_pressure" 0 1000 || { red "$(m 'Invalid vm.vfs_cache_pressure. Use 0-1000.' 'Invalid vm.vfs_cache_pressure. Use 0-1000.')"; return 1; }
 
-  blue "$(m "Configuring $SWAPFILE size=$size" "正在配置 $SWAPFILE，大小=$size")"
+  blue "$(m "Configuring $SWAPFILE size=$size" "Configuring $SWAPFILE size=$size")"
   if swapon --show | awk '{print $1}' | grep -qx "$SWAPFILE"; then
-    yellow "$(m "$SWAPFILE is currently active. To recreate it, it must be swapoff first." "$SWAPFILE 当前已启用。若要重建，需要先 swapoff。")"
-    confirm_yes "$(m "Recreate active $SWAPFILE?" "是否重建正在使用的 $SWAPFILE？")" || return 0
-    swapoff "$SWAPFILE" || { red "$(m 'swapoff failed. Memory may be too tight. Aborting.' 'swapoff 失败，可能当前内存太紧。已中止。')"; return 1; }
+    yellow "$(m "$SWAPFILE is currently active. To recreate it, it must be swapoff first." "$SWAPFILE is currently active. To recreate it, it must be swapoff first.")"
+    confirm_yes "$(m "Recreate active $SWAPFILE?" "Recreate active $SWAPFILE?")" || return 0
+    swapoff "$SWAPFILE" || { red "$(m 'swapoff failed. Memory may be too tight. Aborting.' 'swapoff failed. Memory may be too tight. Aborting.')"; return 1; }
   elif [ -e "$SWAPFILE" ]; then
-    confirm_yes "$(m "$SWAPFILE exists and will be reformatted. Continue?" "$SWAPFILE 已存在并将被重新格式化。继续？")" || return 0
+    confirm_yes "$(m "$SWAPFILE exists and will be reformatted. Continue?" "$SWAPFILE exists and will be reformatted. Continue?")" || return 0
   fi
 
   rm -f "$SWAPFILE"
@@ -773,7 +773,7 @@ setup_swapfile() {
   grep -qE "^[^#]*[[:space:]]${SWAPFILE}[[:space:]]" /etc/fstab || echo "$SWAPFILE none swap sw,pri=10 0 0" >> /etc/fstab
   apply_memory_sysctl "$swappiness" "$vfs_cache_pressure"
 
-  green "$(m 'Swapfile configured.' 'swapfile 配置完成。')"
+  green "$(m 'Swapfile configured.' 'Swapfile configured.')"
   free -h
   swapon --show --output=NAME,TYPE,SIZE,USED,PRIO 2>/dev/null || swapon --show
 }
@@ -795,8 +795,8 @@ stop_known_zram_services() {
 
 setup_zram_generator() {
   local size_expr algo
-  size_expr="$(input_default "$(m 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)' 'ZRAM 大小/表达式，例如 512M / 2G / ram / 2 / min(ram / 2, 1024M)')" "$(recommend_zram_size)")"
-  algo="$(input_default "$(m 'Compression algorithm' '压缩算法')" "zstd")"
+  size_expr="$(input_default "$(m 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)' 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)')" "$(recommend_zram_size)")"
+  algo="$(input_default "$(m 'Compression algorithm' 'Compression algorithm')" "zstd")"
   apt_install systemd-zram-generator
   mkdir -p /etc/systemd
   backup_path /etc/systemd/zram-generator.conf >/dev/null
@@ -829,8 +829,8 @@ setup_zram_tools() {
 
 setup_zram_fallback() {
   local size mb
-  size="$(input_default "$(m 'ZRAM fallback size' 'ZRAM fallback 大小')" "$(recommend_zram_size)")"
-  valid_size_mb_gb "$size" || { red "$(m 'Invalid ZRAM fallback size. Use a positive value such as 512M or 2G.' 'ZRAM fallback 大小无效。请使用 512M 或 2G 等正数格式。')"; return 1; }
+  size="$(input_default "$(m 'ZRAM fallback size' 'ZRAM fallback size')" "$(recommend_zram_size)")"
+  valid_size_mb_gb "$size" || { red "$(m 'Invalid ZRAM fallback size. Use a positive value such as 512M or 2G.' 'Invalid ZRAM fallback size. Use a positive value such as 512M or 2G.')"; return 1; }
   mb="$(parse_size_to_mb "$size")" || return 1
   cat > /usr/local/sbin/zram-swap-start.sh <<EOF2
 #!/usr/bin/env bash
@@ -875,10 +875,10 @@ EOF2
 
 setup_zram() {
   local enable size_hint
-  enable="$(input_yes_no "$(m 'Enable/configure ZRAM?' '启用/配置 ZRAM？')" "yes")" || return 1
-  [ "$enable" = "yes" ] || { yellow "$(m 'ZRAM skipped.' '已跳过 ZRAM。')"; return 0; }
-  is_systemd || { red "$(m 'systemd not detected. ZRAM auto-start setup skipped.' '未检测到 systemd，跳过 ZRAM 自启动配置。')"; return 1; }
-  zram_supported || { red "$(m 'ZRAM not supported by this kernel/VPS layer.' '当前内核或 VPS 虚拟化层不支持 ZRAM。')"; return 1; }
+  enable="$(input_yes_no "$(m 'Enable/configure ZRAM?' 'Enable/configure ZRAM?')" "yes")" || return 1
+  [ "$enable" = "yes" ] || { yellow "$(m 'ZRAM skipped.' 'ZRAM skipped.')"; return 0; }
+  is_systemd || { red "$(m 'systemd not detected. ZRAM auto-start setup skipped.' 'systemd not detected. ZRAM auto-start setup skipped.')"; return 1; }
+  zram_supported || { red "$(m 'ZRAM not supported by this kernel/VPS layer.' 'ZRAM not supported by this kernel/VPS layer.')"; return 1; }
 
   size_hint="$(recommend_zram_size)"
   apt_update_once
@@ -892,7 +892,7 @@ setup_zram() {
     stop_known_zram_services
     setup_zram_fallback
   fi
-  green "$(m 'ZRAM status:' 'ZRAM 状态：')"
+  green "$(m 'ZRAM status:' 'ZRAM status:')"
   free -h
   swapon --show --output=NAME,TYPE,SIZE,USED,PRIO 2>/dev/null || swapon --show
 }
@@ -900,30 +900,30 @@ setup_zram() {
 memory_optimize_menu() {
   while true; do
     clear_screen
-    title "$(m 'Memory / Swap / ZRAM' '内存 / Swap / ZRAM')"
-    echo "1) $(m 'Memory audit report' '内存审计报告')"
-    echo "2) $(m 'Configure/Reconfigure swapfile' '配置/重配 swapfile')"
-    echo "3) $(m 'Configure/Reconfigure ZRAM' '配置/重配 ZRAM')"
-    echo "4) $(m 'Apply VM sysctl only' '仅应用 VM sysctl')"
-    echo "5) $(m 'Apply full recommended memory profile' '应用完整推荐内存配置')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    title "$(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
+    echo "1) $(m 'Memory audit report' 'Memory audit report')"
+    echo "2) $(m 'Configure/Reconfigure swapfile' 'Configure/Reconfigure swapfile')"
+    echo "3) $(m 'Configure/Reconfigure ZRAM' 'Configure/Reconfigure ZRAM')"
+    echo "4) $(m 'Apply VM sysctl only' 'Apply VM sysctl only')"
+    echo "5) $(m 'Apply full recommended memory profile' 'Apply full recommended memory profile')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) memory_report; pause ;;
       2) setup_swapfile; pause ;;
       3) setup_zram; pause ;;
       4)
         apply_memory_sysctl "$(input_default "vm.swappiness" "$(recommend_swappiness)")" "$(input_default "vm.vfs_cache_pressure" "50")"
-        green "$(m 'VM memory sysctl applied.' 'VM 内存 sysctl 已应用。')"; pause ;;
+        green "$(m 'VM memory sysctl applied.' 'VM memory sysctl applied.')"; pause ;;
       5)
         memory_report
-        confirm_yes "$(m 'Apply recommended memory profile?' '应用推荐内存配置？')" || { pause; continue; }
+        confirm_yes "$(m 'Apply recommended memory profile?' 'Apply recommended memory profile?')" || { pause; continue; }
         apply_memory_sysctl "$(recommend_swappiness)" "50"
         setup_swapfile
         setup_zram
         pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -936,9 +936,9 @@ bbr_supported() {
 
 enable_bbr() {
   local config_file="/etc/sysctl.d/90-bbr.conf" config_backup=""
-  blue "$(m 'Enabling BBR if supported...' '正在尝试启用 BBR...')"
+  blue "$(m 'Enabling BBR if supported...' 'Enabling BBR if supported...')"
   if ! bbr_supported; then
-    red "$(m 'BBR is not supported or is blocked by the virtualization layer.' '当前内核不支持 BBR，或被 VPS 虚拟化层限制。')"
+    red "$(m 'BBR is not supported or is blocked by the virtualization layer.' 'BBR is not supported or is blocked by the virtualization layer.')"
     return 1
   fi
   backup_path "$config_file" >/dev/null || return 1
@@ -948,7 +948,7 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF2
   if ! sysctl -p /etc/sysctl.d/90-bbr.conf >/dev/null; then
-    red "$(m 'Failed to apply BBR sysctl settings. Restoring the previous configuration.' '应用 BBR sysctl 设置失败，正在恢复之前的配置。')"
+    red "$(m 'Failed to apply BBR sysctl settings. Restoring the previous configuration.' 'Failed to apply BBR sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
     if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
     return 1
@@ -983,12 +983,12 @@ net.ipv4.tcp_congestion_control=bbr
 EOF2
   fi
   if ! sysctl -p /etc/sysctl.d/99-proxy-tuning.conf >/dev/null; then
-    red "$(m 'Failed to apply proxy sysctl settings. Restoring the previous configuration.' '应用代理 sysctl 设置失败，正在恢复之前的配置。')"
+    red "$(m 'Failed to apply proxy sysctl settings. Restoring the previous configuration.' 'Failed to apply proxy sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
     if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
     return 1
   fi
-  green "$(m 'Proxy sysctl tuning applied.' '代理机 sysctl 优化已应用。')"
+  green "$(m 'Proxy sysctl tuning applied.' 'Proxy sysctl tuning applied.')"
 }
 
 raise_nofile_limits() {
@@ -1011,7 +1011,7 @@ DefaultLimitNOFILE=1048576
 EOF2
     systemctl daemon-reexec || true
   fi
-  green "$(m 'nofile limits written. Reboot or restart services for full effect.' 'nofile 限制已写入。重启系统或重启服务后完全生效。')"
+  green "$(m 'nofile limits written. Reboot or restart services for full effect.' 'nofile limits written. Reboot or restart services for full effect.')"
 }
 
 # ---------- SSH ----------
@@ -1052,8 +1052,8 @@ ssh_effective() {
 }
 
 ssh_audit() {
-  section "$(m 'SSH audit' 'SSH 审计')"
-  if ! has_cmd sshd; then status_bad "$(m 'sshd not found.' '未找到 sshd。')"; return 1; fi
+  section "$(m 'SSH audit' 'SSH audit')"
+  if ! has_cmd sshd; then status_bad "$(m 'sshd not found.' 'sshd not found.')"; return 1; fi
 
   local port pass root pub maxauth maxsessions maxstartups grace forwarding x11 agent kbd empty tunnel gateway pam authmethods nonroot_count nonroot_hashes
   port="$(current_ssh_ports)"
@@ -1097,46 +1097,46 @@ ssh_audit() {
   kv "Non-root users with password hash" "$nonroot_hashes"
 
   echo
-  if [ "$pub" = "yes" ]; then status_ok "$(m 'Public-key authentication is enabled.' '公钥认证已启用。')"; else status_bad "$(m 'PubkeyAuthentication is not enabled.' '公钥认证未启用。')"; fi
+  if [ "$pub" = "yes" ]; then status_ok "$(m 'Public-key authentication is enabled.' 'Public-key authentication is enabled.')"; else status_bad "$(m 'PubkeyAuthentication is not enabled.' 'PubkeyAuthentication is not enabled.')"; fi
 
   case "$root" in
     without-password)
-      status_ok "$(m 'Root password login is blocked; without-password is an old alias. Prefer prohibit-password for clarity.' 'root 密码登录已被阻止；without-password 是旧别名，建议改为 prohibit-password 以便更清晰。')" ;;
+      status_ok "$(m 'Root password login is blocked; without-password is an old alias. Prefer prohibit-password for clarity.' 'Root password login is blocked; without-password is an old alias. Prefer prohibit-password for clarity.')" ;;
     prohibit-password)
-      status_ok "$(m 'Root password login is blocked by prohibit-password.' 'root 密码登录已被 prohibit-password 阻止。')" ;;
+      status_ok "$(m 'Root password login is blocked by prohibit-password.' 'Root password login is blocked by prohibit-password.')" ;;
     no)
-      status_ok "$(m 'Root SSH login is disabled.' 'root SSH 登录已禁用。')" ;;
+      status_ok "$(m 'Root SSH login is disabled.' 'Root SSH login is disabled.')" ;;
     yes)
-      status_warn "$(m 'Root login is fully allowed. Prefer prohibit-password or no.' 'root 登录完全允许。建议改为 prohibit-password 或 no。')" ;;
+      status_warn "$(m 'Root login is fully allowed. Prefer prohibit-password or no.' 'Root login is fully allowed. Prefer prohibit-password or no.')" ;;
     *)
-      status_info "$(m "Root login policy: $root" "root 登录策略：$root")" ;;
+      status_info "$(m "Root login policy: $root" "Root login policy: $root")" ;;
   esac
 
   if [ "$pass" = "yes" ]; then
     if [ "$nonroot_count" -eq 0 ]; then
-      status_info "$(m 'PasswordAuthentication is enabled globally, but no non-root interactive user was detected. This is mainly a future-risk setting.' 'PasswordAuthentication 全局开启，但未检测到非 root 交互用户；当前主要是未来风险。')"
+      status_info "$(m 'PasswordAuthentication is enabled globally, but no non-root interactive user was detected. This is mainly a future-risk setting.' 'PasswordAuthentication is enabled globally, but no non-root interactive user was detected. This is mainly a future-risk setting.')"
     elif [ "$nonroot_hashes" -gt 0 ]; then
-      status_warn "$(m 'Password SSH may be possible for non-root users with password hashes. Consider PasswordAuthentication no.' '有非 root 用户带密码 hash，可能可用密码 SSH 登录；建议考虑 PasswordAuthentication no。')"
+      status_warn "$(m 'Password SSH may be possible for non-root users with password hashes. Consider PasswordAuthentication no.' 'Password SSH may be possible for non-root users with password hashes. Consider PasswordAuthentication no.')"
     else
-      status_warn "$(m 'PasswordAuthentication is enabled globally. Check whether non-root users can use password login.' 'PasswordAuthentication 全局开启，请确认非 root 用户是否可密码登录。')"
+      status_warn "$(m 'PasswordAuthentication is enabled globally. Check whether non-root users can use password login.' 'PasswordAuthentication is enabled globally. Check whether non-root users can use password login.')"
     fi
   else
-    status_ok "$(m 'PasswordAuthentication is disabled.' '密码登录已关闭。')"
+    status_ok "$(m 'PasswordAuthentication is disabled.' 'PasswordAuthentication is disabled.')"
   fi
 
-  if [ "$kbd" = "yes" ]; then status_warn "$(m 'Keyboard-interactive auth is enabled. Consider KbdInteractiveAuthentication no.' 'keyboard-interactive 认证已开启，建议 KbdInteractiveAuthentication no。')"; else status_ok "$(m 'Keyboard-interactive auth is disabled.' 'keyboard-interactive 认证已关闭。')"; fi
-  if [ "$empty" = "yes" ]; then status_bad "$(m 'Empty passwords are permitted. Disable immediately.' '空密码被允许，请立即关闭。')"; else status_ok "$(m 'Empty passwords are not permitted.' '空密码未被允许。')"; fi
-  if [ "$x11" = "yes" ]; then status_warn "$(m 'X11Forwarding is enabled. Ordinary VPS usually should set it to no.' 'X11Forwarding 已开启。普通 VPS 通常建议设为 no。')"; else status_ok "$(m 'X11Forwarding is disabled.' 'X11Forwarding 已关闭。')"; fi
-  if [ "$agent" = "yes" ]; then status_warn "$(m 'Agent forwarding is enabled. Disable it unless this host is a trusted jump box.' 'Agent 转发已开启。除非这台机是可信跳板机，否则建议关闭。')"; else status_ok "$(m 'Agent forwarding is disabled.' 'Agent 转发已关闭。')"; fi
-  if [ "$gateway" = "yes" ]; then status_warn "$(m 'GatewayPorts is enabled; remote forwards may bind publicly.' 'GatewayPorts 已开启，远程转发可能绑定公网地址。')"; else status_ok "$(m 'GatewayPorts is not open.' 'GatewayPorts 未开放。')"; fi
-  if [ "$tunnel" = "yes" ]; then status_warn "$(m 'PermitTunnel is enabled. Usually unnecessary for normal VPS management.' 'PermitTunnel 已开启。普通 VPS 管理通常不需要。')"; else status_ok "$(m 'PermitTunnel is disabled.' 'PermitTunnel 已关闭。')"; fi
+  if [ "$kbd" = "yes" ]; then status_warn "$(m 'Keyboard-interactive auth is enabled. Consider KbdInteractiveAuthentication no.' 'Keyboard-interactive auth is enabled. Consider KbdInteractiveAuthentication no.')"; else status_ok "$(m 'Keyboard-interactive auth is disabled.' 'Keyboard-interactive auth is disabled.')"; fi
+  if [ "$empty" = "yes" ]; then status_bad "$(m 'Empty passwords are permitted. Disable immediately.' 'Empty passwords are permitted. Disable immediately.')"; else status_ok "$(m 'Empty passwords are not permitted.' 'Empty passwords are not permitted.')"; fi
+  if [ "$x11" = "yes" ]; then status_warn "$(m 'X11Forwarding is enabled. Ordinary VPS usually should set it to no.' 'X11Forwarding is enabled. Ordinary VPS usually should set it to no.')"; else status_ok "$(m 'X11Forwarding is disabled.' 'X11Forwarding is disabled.')"; fi
+  if [ "$agent" = "yes" ]; then status_warn "$(m 'Agent forwarding is enabled. Disable it unless this host is a trusted jump box.' 'Agent forwarding is enabled. Disable it unless this host is a trusted jump box.')"; else status_ok "$(m 'Agent forwarding is disabled.' 'Agent forwarding is disabled.')"; fi
+  if [ "$gateway" = "yes" ]; then status_warn "$(m 'GatewayPorts is enabled; remote forwards may bind publicly.' 'GatewayPorts is enabled; remote forwards may bind publicly.')"; else status_ok "$(m 'GatewayPorts is not open.' 'GatewayPorts is not open.')"; fi
+  if [ "$tunnel" = "yes" ]; then status_warn "$(m 'PermitTunnel is enabled. Usually unnecessary for normal VPS management.' 'PermitTunnel is enabled. Usually unnecessary for normal VPS management.')"; else status_ok "$(m 'PermitTunnel is disabled.' 'PermitTunnel is disabled.')"; fi
 
-  if [[ "$maxauth" =~ ^[0-9]+$ ]] && [ "$maxauth" -le 3 ]; then status_ok "$(m 'MaxAuthTries is strict enough.' 'MaxAuthTries 足够严格。')"; else status_warn "$(m 'Consider MaxAuthTries 3.' '建议考虑 MaxAuthTries 3。')"; fi
-  if [[ "$grace" =~ ^[0-9]+$ ]] && [ "$grace" -le 60 ]; then status_ok "$(m 'LoginGraceTime is reasonably short.' 'LoginGraceTime 较合理。')"; else status_warn "$(m 'Consider LoginGraceTime 30.' '建议考虑 LoginGraceTime 30。')"; fi
+  if [[ "$maxauth" =~ ^[0-9]+$ ]] && [ "$maxauth" -le 3 ]; then status_ok "$(m 'MaxAuthTries is strict enough.' 'MaxAuthTries is strict enough.')"; else status_warn "$(m 'Consider MaxAuthTries 3.' 'Consider MaxAuthTries 3.')"; fi
+  if [[ "$grace" =~ ^[0-9]+$ ]] && [ "$grace" -le 60 ]; then status_ok "$(m 'LoginGraceTime is reasonably short.' 'LoginGraceTime is reasonably short.')"; else status_warn "$(m 'Consider LoginGraceTime 30.' 'Consider LoginGraceTime 30.')"; fi
 
   if [ "$nonroot_count" -gt 0 ]; then
     echo
-    muted "  $(m 'Interactive users:' '交互用户：')"
+    muted "  $(m 'Interactive users:' 'Interactive users:')"
     interactive_users | print_block
   fi
 }
@@ -1238,12 +1238,12 @@ ssh_require_key_login_ready() {
 
 ssh_install_key() {
   local user key home auth group
-  user="$(input_default "$(m 'Target user' '目标用户')" "root")"
-  read -r -p "$(m 'Paste SSH public key: ' '粘贴 SSH 公钥：')" key || true
-  [ -n "$key" ] || { red "$(m 'Empty key.' '公钥为空。')"; return 1; }
-  valid_ssh_public_key "$key" || { red "$(m 'Invalid SSH public key format.' 'SSH 公钥格式无效。')"; return 1; }
+  user="$(input_default "$(m 'Target user' 'Target user')" "root")"
+  read -r -p "$(m 'Paste SSH public key: ' 'Paste SSH public key: ')" key || true
+  [ -n "$key" ] || { red "$(m 'Empty key.' 'Empty key.')"; return 1; }
+  valid_ssh_public_key "$key" || { red "$(m 'Invalid SSH public key format.' 'Invalid SSH public key format.')"; return 1; }
   if [ "$user" = "root" ]; then home="/root"; else home="$(getent passwd "$user" | cut -d: -f6)"; fi
-  [ -d "$home" ] || { red "$(m "User home not found: $home" "未找到用户家目录：$home")"; return 1; }
+  [ -d "$home" ] || { red "$(m "User home not found: $home" "User home not found: $home")"; return 1; }
   mkdir -p "$home/.ssh"
   group="$(id -gn "$user" 2>/dev/null || echo "$user")"
   auth="$home/.ssh/authorized_keys"
@@ -1252,7 +1252,7 @@ ssh_install_key() {
   chmod 600 "$auth"
   grep -qxF "$key" "$auth" || echo "$key" >> "$auth"
   chown -R "$user:$group" "$home/.ssh" 2>/dev/null || true
-  green "$(m "Public key installed for $user." "已为 $user 安装公钥。")"
+  green "$(m "Public key installed for $user." "Public key installed for $user.")"
 }
 
 ssh_reload_or_restart() {
@@ -1282,19 +1282,19 @@ ssh_restore_hardening_backup() {
 
 ssh_write_hardening() {
   local port allow_user password_policy permit_root strict_forwarding allow_tcp fragment_backup=""
-  port="$(input_default "$(m 'New SSH port' '新的 SSH 端口')" "$(current_ssh_port_guess)")"
-  valid_port "$port" || { red "$(m 'Invalid SSH port. Use 1-65535.' 'SSH 端口无效，请使用 1-65535。')"; return 1; }
-  allow_user="$(input_default "$(m 'AllowUsers value, empty means do not set' 'AllowUsers 值，留空表示不设置')" "")"
+  port="$(input_default "$(m 'New SSH port' 'New SSH port')" "$(current_ssh_port_guess)")"
+  valid_port "$port" || { red "$(m 'Invalid SSH port. Use 1-65535.' 'Invalid SSH port. Use 1-65535.')"; return 1; }
+  allow_user="$(input_default "$(m 'AllowUsers value, empty means do not set' 'AllowUsers value, empty means do not set')" "")"
   valid_allow_users_value "$allow_user" || { red "$(m 'Invalid AllowUsers value. Use space-separated usernames or user@host patterns only.' 'Invalid AllowUsers value. Use space-separated usernames or user@host patterns only.')"; return 1; }
-  password_policy="$(normalize_password_policy "$(input_default "$(m 'PasswordAuthentication policy: keep/no/yes' 'PasswordAuthentication 策略：keep/no/yes')" "keep")")" || { red "$(m 'Invalid PasswordAuthentication policy. Use keep, no, or yes.' 'PasswordAuthentication 策略无效，请使用 keep、no 或 yes。')"; return 1; }
+  password_policy="$(normalize_password_policy "$(input_default "$(m 'PasswordAuthentication policy: keep/no/yes' 'PasswordAuthentication policy: keep/no/yes')" "keep")")" || { red "$(m 'Invalid PasswordAuthentication policy. Use keep, no, or yes.' 'Invalid PasswordAuthentication policy. Use keep, no, or yes.')"; return 1; }
   if [ "$password_policy" = "yes" ]; then
-    yellow "$(m 'Enabling SSH password login is usually not recommended.' '通常不建议开启 SSH 密码登录。')"
-    confirm_yes "$(m 'Explicitly enable SSH password login?' '明确开启 SSH 密码登录？')" || return 0
+    yellow "$(m 'Enabling SSH password login is usually not recommended.' 'Enabling SSH password login is usually not recommended.')"
+    confirm_yes "$(m 'Explicitly enable SSH password login?' 'Explicitly enable SSH password login?')" || return 0
   fi
   permit_root="$(input_default "PermitRootLogin" "prohibit-password")"
   valid_permit_root_login "$permit_root" || { red "$(m 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.' 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.')"; return 1; }
-  strict_forwarding="$(input_yes_no "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding?' '关闭 Agent/X11/Tunnel/Gateway 转发？')" "yes")" || return 1
-  allow_tcp="$(input_yes_no "$(m 'Allow TCP forwarding for ssh -L/-R/-D?' '允许 TCP 转发用于 ssh -L/-R/-D？')" "yes")" || return 1
+  strict_forwarding="$(input_yes_no "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding?' 'Disable Agent/X11/Tunnel/Gateway forwarding?')" "yes")" || return 1
+  allow_tcp="$(input_yes_no "$(m 'Allow TCP forwarding for ssh -L/-R/-D?' 'Allow TCP forwarding for ssh -L/-R/-D?')" "yes")" || return 1
   if [ "$password_policy" = "no" ]; then
     ssh_require_key_login_ready "$allow_user" "$permit_root" || return 1
   fi
@@ -1302,7 +1302,7 @@ ssh_write_hardening() {
   backup_path /etc/ssh/sshd_config >/dev/null
   mkdir -p /etc/ssh/sshd_config.d
   if [ -e "$SSH_HARDENING_FRAGMENT" ]; then
-    backup_path "$SSH_HARDENING_FRAGMENT" >/dev/null || { red "$(m 'Failed to back up the existing SSH hardening fragment.' '备份现有 SSH hardening 片段失败。')"; return 1; }
+    backup_path "$SSH_HARDENING_FRAGMENT" >/dev/null || { red "$(m 'Failed to back up the existing SSH hardening fragment.' 'Failed to back up the existing SSH hardening fragment.')"; return 1; }
     fragment_backup="$BACKUP_LAST_PATH"
   fi
 
@@ -1340,16 +1340,16 @@ EOF2
   [ -n "$allow_user" ] && echo "AllowUsers $allow_user" >> "$SSH_HARDENING_FRAGMENT"
 
   if ! sshd -t; then
-    red "$(m 'sshd config test failed. Restoring the previous fragment.' 'sshd 配置检查失败，正在恢复之前的片段。')"
-    ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' '恢复之前的 SSH 配置失败；请保持当前 SSH 会话并手动检查 sshd。')"
+    red "$(m 'sshd config test failed. Restoring the previous fragment.' 'sshd config test failed. Restoring the previous fragment.')"
+    ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.')"
     return 1
   fi
 
   if has_cmd ufw; then
     ufw_ensure_ssh_access || { ssh_restore_hardening_backup "$fragment_backup"; return 1; }
     if ! ufw allow "$port/tcp" comment "SSH"; then
-      red "$(m 'SSH firewall allow failed; restoring the previous fragment before SSH reload.' 'SSH 防火墙放行失败；在重载 SSH 前恢复之前的片段。')"
-      ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' '恢复之前的 SSH 配置失败；请保持当前 SSH 会话并手动检查 sshd。')"
+      red "$(m 'SSH firewall allow failed; restoring the previous fragment before SSH reload.' 'SSH firewall allow failed; restoring the previous fragment before SSH reload.')"
+      ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.')"
       return 1
     fi
   fi
@@ -1358,47 +1358,47 @@ EOF2
     ssh_restore_hardening_backup "$fragment_backup" || red "Rollback reload also failed; keep the current SSH session open and inspect sshd/systemd manually."
     return 1
   fi
-  green "$(m "SSH config applied. Keep current session open and test: ssh -p $port <user>@<ip>" "SSH 配置已应用。不要关闭当前窗口，请另开终端测试：ssh -p $port <user>@<ip>")"
+  green "$(m "SSH config applied. Keep current session open and test: ssh -p $port <user>@<ip>" "SSH config applied. Keep current session open and test: ssh -p $port <user>@<ip>")"
   ssh_audit
 }
 
 ssh_restore_fragment() {
-  confirm_yes "$(m 'Remove SSH fragment written by this script?' '删除本脚本写入的 SSH 配置片段？')" || return 0
+  confirm_yes "$(m 'Remove SSH fragment written by this script?' 'Remove SSH fragment written by this script?')" || return 0
   rm -f "$SSH_HARDENING_FRAGMENT" /etc/ssh/sshd_config.d/99-vps-init-hardening.conf
   sshd -t && ssh_reload_or_restart
-  green "$(m 'SSH hardening fragment removed.' 'SSH hardening 片段已删除。')"
+  green "$(m 'SSH hardening fragment removed.' 'SSH hardening fragment removed.')"
 }
 
 ssh_menu() {
   while true; do
     clear_screen
     title "SSH"
-    echo "1) $(m 'SSH audit' 'SSH 审计')"
-    echo "2) $(m 'Install public key' '安装公钥')"
-    echo "3) $(m 'Configure SSH hardening fragment' '配置 SSH hardening 片段')"
-    echo "4) $(m 'Restore/remove hardening fragment' '恢复/删除 hardening 片段')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    echo "1) $(m 'SSH audit' 'SSH audit')"
+    echo "2) $(m 'Install public key' 'Install public key')"
+    echo "3) $(m 'Configure SSH hardening fragment' 'Configure SSH hardening fragment')"
+    echo "4) $(m 'Restore/remove hardening fragment' 'Restore/remove hardening fragment')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) ssh_audit; pause ;;
       2) ssh_install_key; pause ;;
       3) ssh_write_hardening; pause ;;
       4) ssh_restore_fragment; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
 # ---------- UFW / Fail2ban ----------
-ufw_install() { apt_install ufw; green "$(m 'UFW installed.' 'UFW 已安装。')"; }
+ufw_install() { apt_install ufw; green "$(m 'UFW installed.' 'UFW installed.')"; }
 
 ufw_warn_default_ssh_port() {
   local ssh_ports="$1"
   if printf ' %s ' "$ssh_ports" | grep -q ' 22 '; then
-    yellow "$(m 'SSH appears to include the default port 22.' '检测到 SSH 仍包含默认 22 端口。')"
-    status_info "$(m 'Before enabling UFW, consider using the SSH menu to move SSH to a custom port, install a public key, and use key-only login.' '启用 UFW 前，建议先使用 SSH 菜单修改端口、安装公钥，并配置仅公钥登录。')"
-    status_info "$(m 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.' '为避免锁死，工具仍会在 UFW 变更前自动放行当前 SSH 端口。')"
+    yellow "$(m 'SSH appears to include the default port 22.' 'SSH appears to include the default port 22.')"
+    status_info "$(m 'Before enabling UFW, consider using the SSH menu to move SSH to a custom port, install a public key, and use key-only login.' 'Before enabling UFW, consider using the SSH menu to move SSH to a custom port, install a public key, and use key-only login.')"
+    status_info "$(m 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.' 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.') before UFW changes to avoid locking you out.')"
   fi
 }
 
@@ -1408,49 +1408,49 @@ ufw_ensure_ssh_access() {
   [ -n "$ssh_ports" ] || ssh_ports="22"
   ufw_warn_default_ssh_port "$ssh_ports"
   for p in $ssh_ports; do
-    valid_port "$p" || { red "$(m "Invalid detected SSH port: $p" "检测到无效 SSH 端口：$p")"; return 1; }
+    valid_port "$p" || { red "$(m "Invalid detected SSH port: $p" "Invalid detected SSH port: $p")"; return 1; }
     ufw allow "$p/tcp" comment "SSH" || return 1
   done
-  status_ok "$(m "Allowed SSH port(s): $ssh_ports/tcp." "已放行 SSH 端口：$ssh_ports/tcp。")"
+  status_ok "$(m "Allowed SSH port(s): $ssh_ports/tcp." "Allowed SSH port(s): $ssh_ports/tcp."): $ssh_ports/tcp.")"
 }
 
 ufw_audit() {
-  section "$(m 'Firewall audit' '防火墙审计')"
+  section "$(m 'Firewall audit' 'Firewall audit')"
   local ssh_ports ufw_state
   ssh_ports="$(current_ssh_ports)"
 
   if ! has_cmd ufw; then
-    status_warn "$(m 'UFW is not installed.' 'UFW 未安装。')"
+    status_warn "$(m 'UFW is not installed.' 'UFW is not installed.')"
   else
     ufw_state="$(ufw status 2>/dev/null | awk 'NR==1 {print $2}')"
     kv "UFW status" "${ufw_state:-unknown}"
     if ufw status | grep -q inactive; then
-      status_warn "$(m "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling." "UFW 未启用。安全初始化会先放行 SSH 端口 $ssh_ports 再启用。")"
+      status_warn "$(m "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling." "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling.") $ssh_ports before enabling.")"
     else
-      status_ok "$(m 'UFW is active.' 'UFW 已启用。')"
+      status_ok "$(m 'UFW is active.' 'UFW is active.')"
     fi
     echo
-    muted "  $(m 'UFW rules:' 'UFW 规则：')"
+    muted "  $(m 'UFW rules:' 'UFW rules:')"
     ufw status numbered 2>/dev/null | sed -n '1,25p' | print_block || true
   fi
 
   echo
-  muted "  $(m 'Listening TCP/UDP ports and processes:' '监听 TCP/UDP 端口及进程：')"
+  muted "  $(m 'Listening TCP/UDP ports and processes:' 'Listening TCP/UDP ports and processes:')"
   listening_ports_compact | print_block || true
 
   echo
-  status_info "$(m "Current SSH port guess: $ssh_ports/tcp." "当前 SSH 端口推测：$ssh_ports/tcp。")"
-  status_warn "$(m 'Admin panels should usually be restricted to your management IP/CIDR.' '管理面板通常应限制为仅你的管理 IP/CIDR 可访问。')"
-  status_info "$(m 'If using Cloudflare CDN for 80/443, add CF allow rules first, then manually remove broad 80/443 rules after verification.' '如果 80/443 使用 Cloudflare CDN，应先添加 CF 放行规则，确认后再手动删除宽泛 80/443 放行。')"
+  status_info "$(m "Current SSH port guess: $ssh_ports/tcp." "Current SSH port guess: $ssh_ports/tcp.")"
+  status_warn "$(m 'Admin panels should usually be restricted to your management IP/CIDR.' 'Admin panels should usually be restricted to your management IP/CIDR.')"
+  status_info "$(m 'If using Cloudflare CDN for 80/443, add CF allow rules first, then manually remove broad 80/443 rules after verification.' 'If using Cloudflare CDN for 80/443, add CF allow rules first, then manually remove broad 80/443 rules after verification.')"
 }
 
 ufw_init_safe() {
   ufw_install
   local ssh_ports
   ssh_ports="$(current_ssh_ports)"
-  yellow "$(m "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW." "将设置：默认拒绝入站、允许出站、放行 SSH 端口：$ssh_ports，然后启用 UFW。")"
+  yellow "$(m "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW." "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW."): $ssh_ports, then enable UFW.")"
   ufw_warn_default_ssh_port "$ssh_ports"
-  confirm_yes "$(m 'Enable UFW safely?' '安全启用 UFW？')" || return 0
+  confirm_yes "$(m 'Enable UFW safely?' 'Enable UFW safely?')" || return 0
   ufw_ensure_ssh_access || return 1
   ufw default deny incoming
   ufw default allow outgoing
@@ -1461,11 +1461,11 @@ ufw_init_safe() {
 ufw_allow_port() {
   ufw_install
   local port proto comment
-  port="$(input_default "$(m 'Port or range' '端口或范围')" "443")"
-  proto="$(input_default "$(m 'Protocol tcp/udp' '协议 tcp/udp')" "tcp")"
-  comment="$(input_default "$(m 'Comment' '备注')" "manual")"
-  valid_port_or_range "$port" || { red "$(m 'Invalid port or range. Use 443 or 10000:20000.' '端口或范围无效，请使用 443 或 10000:20000。')"; return 1; }
-  valid_proto "$proto" || { red "$(m 'Invalid protocol. Use tcp or udp.' '协议无效，请使用 tcp 或 udp。')"; return 1; }
+  port="$(input_default "$(m 'Port or range' 'Port or range')" "443")"
+  proto="$(input_default "$(m 'Protocol tcp/udp' 'Protocol tcp/udp')" "tcp")"
+  comment="$(input_default "$(m 'Comment' 'Comment')" "manual")"
+  valid_port_or_range "$port" || { red "$(m 'Invalid port or range. Use 443 or 10000:20000.' 'Invalid port or range. Use 443 or 10000:20000.')"; return 1; }
+  valid_proto "$proto" || { red "$(m 'Invalid protocol. Use tcp or udp.' 'Invalid protocol. Use tcp or udp.')"; return 1; }
   ufw allow "$port/$proto" comment "$comment"
   ufw status numbered
 }
@@ -1473,12 +1473,12 @@ ufw_allow_port() {
 ufw_allow_ip_to_port() {
   ufw_install
   local ip port proto
-  ip="$(input_default "$(m 'Allowed source IP/CIDR' '允许的来源 IP/CIDR')" "")"
-  port="$(input_default "$(m 'Destination port' '目标端口')" "")"
-  proto="$(input_default "$(m 'Protocol tcp/udp' '协议 tcp/udp')" "tcp")"
-  if [ -z "$ip" ] || [ -z "$port" ]; then red "$(m 'Source and port are required.' '来源和端口不能为空。')"; return 1; fi
-  valid_port "$port" || { red "$(m 'Invalid destination port. Use 1-65535.' '目标端口无效，请使用 1-65535。')"; return 1; }
-  valid_proto "$proto" || { red "$(m 'Invalid protocol. Use tcp or udp.' '协议无效，请使用 tcp 或 udp。')"; return 1; }
+  ip="$(input_default "$(m 'Allowed source IP/CIDR' 'Allowed source IP/CIDR')" "")"
+  port="$(input_default "$(m 'Destination port' 'Destination port')" "")"
+  proto="$(input_default "$(m 'Protocol tcp/udp' 'Protocol tcp/udp')" "tcp")"
+  if [ -z "$ip" ] || [ -z "$port" ]; then red "$(m 'Source and port are required.' 'Source and port are required.')"; return 1; fi
+  valid_port "$port" || { red "$(m 'Invalid destination port. Use 1-65535.' 'Invalid destination port. Use 1-65535.')"; return 1; }
+  valid_proto "$proto" || { red "$(m 'Invalid protocol. Use tcp or udp.' 'Invalid protocol. Use tcp or udp.')"; return 1; }
   valid_ip_or_cidr "$ip" || { red "$(m 'Invalid source IP/CIDR. Use an IPv4/IPv6 address or CIDR such as 203.0.113.0/24.' 'Invalid source IP/CIDR. Use an IPv4/IPv6 address or CIDR such as 203.0.113.0/24.')"; return 1; }
   ufw allow from "$ip" to any port "$port" proto "$proto" comment "restricted-$port"
   ufw status numbered
@@ -1510,7 +1510,7 @@ ufw_parse_cloudflare_ports() {
   IFS=',' read -ra port_arr <<< "$ports"
   for p in "${port_arr[@]}"; do
     p="$(echo "$p" | xargs)"
-    valid_port "$p" || { red "$(m "Invalid Cloudflare port: $p" "Cloudflare 端口无效：$p")"; return 1; }
+    valid_port "$p" || { red "$(m "Invalid Cloudflare port: $p" "Invalid Cloudflare port: $p")"; return 1; }
   done
 }
 
@@ -1542,12 +1542,12 @@ ufw_delete_rule_exact() {
 ufw_cf_lock_acquire() {
   mkdir -p "$(dirname "$UFW_CF_LOCK_FILE")"
   if ! has_cmd flock; then
-    red "$(m 'flock is required for safe Cloudflare UFW sync. Install util-linux and retry.' '安全同步 Cloudflare UFW 规则需要 flock。请安装 util-linux 后重试。')"
+    red "$(m 'flock is required for safe Cloudflare UFW sync. Install util-linux and retry.' 'flock is required for safe Cloudflare UFW sync. Install util-linux and retry.')"
     return 1
   fi
   exec {UFW_CF_LOCK_FD}>"$UFW_CF_LOCK_FILE"
   if ! flock -w "${UFW_CF_LOCK_TIMEOUT:-120}" "$UFW_CF_LOCK_FD"; then
-    red "$(m 'Another Cloudflare UFW sync is running; lock timeout reached.' '另一个 Cloudflare UFW 同步正在运行；等待锁超时。')"
+    red "$(m 'Another Cloudflare UFW sync is running; lock timeout reached.' 'Another Cloudflare UFW sync is running; lock timeout reached.')"
     exec {UFW_CF_LOCK_FD}>&- 2>/dev/null || true
     UFW_CF_LOCK_FD=""
     return 1
@@ -1573,12 +1573,12 @@ ufw_sync_cloudflare_web() {
   if [ -n "${UFW_CF_PORTS:-}" ]; then
     ports="$UFW_CF_PORTS"
   else
-    ports="$(input_default "$(m 'Ports to allow from Cloudflare only, comma-separated' '仅允许 Cloudflare 访问的端口，逗号分隔')" "80,443")"
+    ports="$(input_default "$(m 'Ports to allow from Cloudflare only, comma-separated' 'Ports to allow from Cloudflare only, comma-separated')" "80,443")"
   fi
   ufw_parse_cloudflare_ports "$ports" || return 1
-  yellow "$(m 'This incrementally syncs Cloudflare allow rules managed by this tool.' '这会增量同步由本工具托管的 Cloudflare 放行规则。')"
-  yellow "$(m 'It will not remove broad manual 80/443 rules; review those after verification.' '它不会删除手动添加的宽泛 80/443 规则，请验证后自行检查。')"
-  confirm_yes "$(m 'Continue Cloudflare UFW sync?' '继续同步 Cloudflare UFW 规则？')" || return 0
+  yellow "$(m 'This incrementally syncs Cloudflare allow rules managed by this tool.' 'This incrementally syncs Cloudflare allow rules managed by this tool.')"
+  yellow "$(m 'It will not remove broad manual 80/443 rules; review those after verification.' 'It will not remove broad manual 80/443 rules; review those after verification.')"
+  confirm_yes "$(m 'Continue Cloudflare UFW sync?' 'Continue Cloudflare UFW sync?')" || return 0
 
   ufw_cf_lock_acquire || return 1
   ufw_ensure_ssh_access || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
@@ -1601,12 +1601,12 @@ ufw_sync_cloudflare_web() {
   set_diff_file "$desired" "$current" "$deletes"
   add_count="$(wc -l < "$adds" | awk '{print $1}')"
   delete_count="$(wc -l < "$deletes" | awk '{print $1}')"
-  status_info "$(m "Cloudflare rules to add: $add_count; managed stale rules to delete: $delete_count." "需新增 Cloudflare 规则：$add_count；需删除托管的过期规则：$delete_count。")"
+  status_info "$(m "Cloudflare rules to add: $add_count; managed stale rules to delete: $delete_count." "Cloudflare rules to add: $add_count; managed stale rules to delete: $delete_count.")"
 
   while read -r cidr p; do
     if [ -z "$cidr" ] || [ -z "$p" ]; then continue; fi
     if ! ufw allow proto tcp from "$cidr" to any port "$p" comment "cloudflare-$p"; then
-      red "$(m "Cloudflare UFW add failed: $cidr -> $p/tcp. Managed state was not updated." "Cloudflare UFW 新增失败：$cidr -> $p/tcp。托管状态未更新。")"
+      red "$(m "Cloudflare UFW add failed: $cidr -> $p/tcp. Managed state was not updated." "Cloudflare UFW add failed: $cidr -> $p/tcp. Managed state was not updated.")"
       rule_error=1
       break
     fi
@@ -1619,7 +1619,7 @@ ufw_sync_cloudflare_web() {
   while read -r cidr p; do
     if [ -z "$cidr" ] || [ -z "$p" ]; then continue; fi
     if ! ufw_delete_rule_exact "$cidr" "$p"; then
-      red "$(m "Cloudflare UFW delete failed: $cidr -> $p/tcp. Managed state was not updated." "Cloudflare UFW 删除失败：$cidr -> $p/tcp。托管状态未更新。")"
+      red "$(m "Cloudflare UFW delete failed: $cidr -> $p/tcp. Managed state was not updated." "Cloudflare UFW delete failed: $cidr -> $p/tcp. Managed state was not updated.")"
       rule_error=1
       break
     fi
@@ -1641,7 +1641,7 @@ ufw_sync_cloudflare_web() {
 
   ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
   ufw status numbered || true
-  green "$(m 'Cloudflare UFW sync complete.' 'Cloudflare UFW 增量同步完成。')"
+  green "$(m 'Cloudflare UFW sync complete.' 'Cloudflare UFW sync complete.')"
 }
 
 ufw_allow_cloudflare_web() {
@@ -1649,25 +1649,25 @@ ufw_allow_cloudflare_web() {
 }
 
 ufw_reset_safe() {
-  confirm_yes "$(m 'Reset ALL UFW rules?' '重置所有 UFW 规则？')" || return 0
+  confirm_yes "$(m 'Reset ALL UFW rules?' 'Reset ALL UFW rules?')" || return 0
   ufw --force reset
-  green "$(m 'UFW reset.' 'UFW 已重置。')"
+  green "$(m 'UFW reset.' 'UFW reset.')"
 }
 
 ufw_menu() {
   while true; do
     clear_screen
-    title "$(m 'UFW Firewall' 'UFW 防火墙')"
-    echo "1) $(m 'Firewall audit' '防火墙审计')"
-    echo "2) $(m 'Install UFW' '安装 UFW')"
-    echo "3) $(m 'Safe init UFW' '安全初始化 UFW')"
-    echo "4) $(m 'Allow custom port' '放行自定义端口')"
-    echo "5) $(m 'Allow only IP/CIDR to port' '仅允许指定 IP/CIDR 访问端口')"
-    echo "6) $(m 'Rate-limit SSH' '对 SSH 限速')"
-    echo "7) $(m 'Add Cloudflare ranges to 80/443' '添加 Cloudflare 网段到 80/443')"
-    echo "8) $(m 'Reset UFW' '重置 UFW')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    title "$(m 'UFW Firewall' 'UFW Firewall')"
+    echo "1) $(m 'Firewall audit' 'Firewall audit')"
+    echo "2) $(m 'Install UFW' 'Install UFW')"
+    echo "3) $(m 'Safe init UFW' 'Safe init UFW')"
+    echo "4) $(m 'Allow custom port' 'Allow custom port')"
+    echo "5) $(m 'Allow only IP/CIDR to port' 'Allow only IP/CIDR to port')"
+    echo "6) $(m 'Rate-limit SSH' 'Rate-limit SSH')"
+    echo "7) $(m 'Add Cloudflare ranges to 80/443' 'Add Cloudflare ranges to 80/443')"
+    echo "8) $(m 'Reset UFW' 'Reset UFW')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) ufw_audit; pause ;;
       2) ufw_install; pause ;;
@@ -1678,15 +1678,15 @@ ufw_menu() {
       7) ufw_allow_cloudflare_web; pause ;;
       8) ufw_reset_safe; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
 fail2ban_audit() {
-  section "$(m 'Fail2ban audit' 'Fail2ban 审计')"
+  section "$(m 'Fail2ban audit' 'Fail2ban audit')"
   if ! has_cmd fail2ban-client; then
-    status_warn "$(m 'Fail2ban is not installed.' 'Fail2ban 未安装。')"
+    status_warn "$(m 'Fail2ban is not installed.' 'Fail2ban is not installed.')"
     return 0
   fi
   local active jails tmp
@@ -1696,10 +1696,10 @@ fail2ban_audit() {
   kv "Jails" "${jails:-none}"
   tmp="$(mktemp)"
   if fail2ban-client status sshd >"$tmp" 2>/dev/null; then
-    status_ok "$(m 'sshd jail is active.' 'sshd jail 已启用。')"
+    status_ok "$(m 'sshd jail is active.' 'sshd jail is active.')"
     sed -n '1,20p' "$tmp" | print_block
   else
-    status_warn "$(m 'sshd jail is not active or not found.' 'sshd jail 未启用或未找到。')"
+    status_warn "$(m 'sshd jail is not active or not found.' 'sshd jail is not active or not found.')"
   fi
   rm -f "$tmp"
 }
@@ -1713,12 +1713,12 @@ fail2ban_setup_sshd() {
   bantime="$(input_default "bantime" "12h")"
   findtime="$(input_default "findtime" "10m")"
   maxretry="$(input_default "maxretry" "3")"
-  valid_fail2ban_time "$bantime" || { red "$(m 'Invalid bantime. Use values such as 12h, 30m, 600, or -1.' 'bantime 无效。请使用 12h、30m、600 或 -1 等格式。')"; return 1; }
-  valid_fail2ban_time "$findtime" || { red "$(m 'Invalid findtime. Use values such as 10m or 600.' 'findtime 无效。请使用 10m 或 600 等格式。')"; return 1; }
-  valid_positive_int "$maxretry" || { red "$(m 'Invalid maxretry. Use a positive integer.' 'maxretry 无效。请使用正整数。')"; return 1; }
+  valid_fail2ban_time "$bantime" || { red "$(m 'Invalid bantime. Use values such as 12h, 30m, 600, or -1.' 'Invalid bantime. Use values such as 12h, 30m, 600, or -1.')"; return 1; }
+  valid_fail2ban_time "$findtime" || { red "$(m 'Invalid findtime. Use values such as 10m or 600.' 'Invalid findtime. Use values such as 10m or 600.')"; return 1; }
+  valid_positive_int "$maxretry" || { red "$(m 'Invalid maxretry. Use a positive integer.' 'Invalid maxretry. Use a positive integer.')"; return 1; }
   ports="$(current_ssh_ports | tr ' ' ',')"
   if [ -e "$jail_file" ]; then
-    backup_path "$jail_file" >/dev/null || { red "$(m 'Failed to back up the existing Fail2ban jail.' '备份现有 Fail2ban jail 失败。')"; return 1; }
+    backup_path "$jail_file" >/dev/null || { red "$(m 'Failed to back up the existing Fail2ban jail.' 'Failed to back up the existing Fail2ban jail.')"; return 1; }
     jail_backup="$BACKUP_LAST_PATH"
   fi
   cat > "$jail_file" <<EOF2
@@ -1733,13 +1733,13 @@ maxretry = $maxretry
 EOF2
   if has_cmd ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then echo "banaction = ufw" >> "$jail_file"; fi
   if ! fail2ban-client -t; then
-    red "$(m 'Fail2ban configuration test failed. Restoring the previous jail.' 'Fail2ban 配置检查失败，正在恢复之前的 jail。')"
+    red "$(m 'Fail2ban configuration test failed. Restoring the previous jail.' 'Fail2ban configuration test failed. Restoring the previous jail.')"
     if [ -n "$jail_backup" ]; then cp -a "$jail_backup" "$jail_file"; else rm -f "$jail_file"; fi
     fail2ban-client -t || true
     return 1
   fi
   if ! systemctl enable --now fail2ban || ! systemctl restart fail2ban; then
-    red "$(m 'Fail2ban service activation failed. Restoring the previous jail.' 'Fail2ban 服务启用失败，正在恢复之前的 jail。')"
+    red "$(m 'Fail2ban service activation failed. Restoring the previous jail.' 'Fail2ban service activation failed. Restoring the previous jail.')"
     if [ -n "$jail_backup" ]; then cp -a "$jail_backup" "$jail_file"; else rm -f "$jail_file"; fi
     systemctl restart fail2ban 2>/dev/null || true
     return 1
@@ -1750,7 +1750,7 @@ EOF2
 fail2ban_unban() {
   local jail ip
   jail="$(input_default "Jail" "sshd")"
-  ip="$(input_default "$(m 'IP to unban' '要解封的 IP')" "")"
+  ip="$(input_default "$(m 'IP to unban' 'IP to unban')" "")"
   [ -n "$ip" ] || return 1
   valid_ip_literal "$ip" || { red "$(m 'Invalid IP to unban.' 'Invalid IP to unban.')"; return 1; }
   fail2ban-client set "$jail" unbanip "$ip"
@@ -1760,24 +1760,24 @@ fail2ban_menu() {
   while true; do
     clear_screen
     title "Fail2ban"
-    echo "1) $(m 'Audit' '审计')"
-    echo "2) $(m 'Install/configure sshd jail' '安装/配置 sshd jail')"
-    echo "3) $(m 'Unban IP' '解封 IP')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    echo "1) $(m 'Audit' 'Audit')"
+    echo "2) $(m 'Install/configure sshd jail' 'Install/configure sshd jail')"
+    echo "3) $(m 'Unban IP' 'Unban IP')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) fail2ban_audit; pause ;;
       2) fail2ban_setup_sshd; pause ;;
       3) fail2ban_unban; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
 # ---------- DNS ----------
 dns_audit() {
-  section "$(m 'DNS audit' 'DNS 审计')"
+  section "$(m 'DNS audit' 'DNS audit')"
   local target nameservers resolved_state
   target="$(readlink -f /etc/resolv.conf 2>/dev/null || echo plain-file)"
   nameservers="$(awk '/^nameserver/ {print $2}' /etc/resolv.conf 2>/dev/null | paste -sd' ' -)"
@@ -1792,7 +1792,7 @@ dns_audit() {
   fi
 
   if grep -qi cloud-init /etc/resolv.conf 2>/dev/null; then
-    status_warn "$(m '/etc/resolv.conf appears cloud-init managed; direct edits may be overwritten.' '/etc/resolv.conf 似乎由 cloud-init 管理，直接修改可能被覆盖。')"
+    status_warn "$(m '/etc/resolv.conf appears cloud-init managed; direct edits may be overwritten.' '/etc/resolv.conf appears cloud-init managed; direct edits may be overwritten.')"
   fi
   if has_cmd resolvectl; then
     echo
@@ -1800,7 +1800,7 @@ dns_audit() {
     resolvectl dns 2>/dev/null | print_block || true
   fi
   echo
-  status_info "$(m 'Use DNS test before applying changes on production servers.' '生产服务器改 DNS 前建议先测试。')"
+  status_info "$(m 'Use DNS test before applying changes on production servers.' 'Use DNS test before applying changes on production servers.')"
 }
 
 dns_query_time_ms() {
@@ -1848,14 +1848,14 @@ dns_apply_resolved() {
   local dns fallback config_file="/etc/systemd/resolved.conf.d/10-vps-init-dns.conf" config_backup=""
   require_systemd || return 1
   systemctl list-unit-files | grep -q '^systemd-resolved.service' || { red "systemd-resolved not found."; return 1; }
-  dns="$(input_default "$(m 'Primary DNS servers, space-separated' '主 DNS，空格分隔')" "1.1.1.1 8.8.8.8")"
-  fallback="$(input_default "$(m 'Fallback DNS servers, space-separated' '备用 DNS，空格分隔')" "1.0.0.1 8.8.4.4")"
-  valid_ip_list "$dns" || { red "$(m 'Invalid primary DNS server list. Use space-separated IPv4/IPv6 addresses.' '主 DNS 列表无效。请使用空格分隔的 IPv4/IPv6 地址。')"; return 1; }
-  valid_ip_list "$fallback" || { red "$(m 'Invalid fallback DNS server list. Use space-separated IPv4/IPv6 addresses.' '备用 DNS 列表无效。请使用空格分隔的 IPv4/IPv6 地址。')"; return 1; }
-  confirm_yes "$(m 'Apply DNS via systemd-resolved?' '通过 systemd-resolved 应用 DNS？')" || return 0
+  dns="$(input_default "$(m 'Primary DNS servers, space-separated' 'Primary DNS servers, space-separated')" "1.1.1.1 8.8.8.8")"
+  fallback="$(input_default "$(m 'Fallback DNS servers, space-separated' 'Fallback DNS servers, space-separated')" "1.0.0.1 8.8.4.4")"
+  valid_ip_list "$dns" || { red "$(m 'Invalid primary DNS server list. Use space-separated IPv4/IPv6 addresses.' 'Invalid primary DNS server list. Use space-separated IPv4/IPv6 addresses.')"; return 1; }
+  valid_ip_list "$fallback" || { red "$(m 'Invalid fallback DNS server list. Use space-separated IPv4/IPv6 addresses.' 'Invalid fallback DNS server list. Use space-separated IPv4/IPv6 addresses.')"; return 1; }
+  confirm_yes "$(m 'Apply DNS via systemd-resolved?' 'Apply DNS via systemd-resolved?')" || return 0
   mkdir -p /etc/systemd/resolved.conf.d
   if [ -e "$config_file" ]; then
-    backup_path "$config_file" >/dev/null || { red "$(m 'Failed to back up the existing systemd-resolved configuration.' '备份现有 systemd-resolved 配置失败。')"; return 1; }
+    backup_path "$config_file" >/dev/null || { red "$(m 'Failed to back up the existing systemd-resolved configuration.' 'Failed to back up the existing systemd-resolved configuration.')"; return 1; }
     config_backup="$BACKUP_LAST_PATH"
   fi
   cat > "$config_file" <<EOF2
@@ -1865,7 +1865,7 @@ FallbackDNS=$fallback
 Cache=yes
 EOF2
   if ! systemctl enable --now systemd-resolved || ! systemctl restart systemd-resolved; then
-    red "$(m 'systemd-resolved activation failed. Restoring the previous configuration.' 'systemd-resolved 启用失败，正在恢复之前的配置。')"
+    red "$(m 'systemd-resolved activation failed. Restoring the previous configuration.' 'systemd-resolved activation failed. Restoring the previous configuration.')"
     dns_restore_resolved_backup "$config_file" "$config_backup"
     return 1
   fi
@@ -1876,11 +1876,11 @@ dns_apply_resolvconf() {
   local dns1 dns2
   dns1="$(input_default "nameserver 1" "1.1.1.1")"
   dns2="$(input_default "nameserver 2" "8.8.8.8")"
-  valid_ip_literal "$dns1" || { red "$(m 'Invalid nameserver 1. Use an IPv4 or IPv6 address.' 'nameserver 1 无效。请使用 IPv4 或 IPv6 地址。')"; return 1; }
-  valid_ip_literal "$dns2" || { red "$(m 'Invalid nameserver 2. Use an IPv4 or IPv6 address.' 'nameserver 2 无效。请使用 IPv4 或 IPv6 地址。')"; return 1; }
-  [ -L /etc/resolv.conf ] && { red "$(m '/etc/resolv.conf is a managed symbolic link. Use the systemd-resolved option or update the owning network manager instead.' '/etc/resolv.conf 是受管理的符号链接。请使用 systemd-resolved 选项，或修改负责管理它的网络服务。')"; return 1; }
-  yellow "$(m 'Direct /etc/resolv.conf edits may be overwritten by cloud-init, DHCP, NetworkManager, or systemd-resolved.' '直接修改 /etc/resolv.conf 可能被 cloud-init、DHCP、NetworkManager 或 systemd-resolved 覆盖。')"
-  confirm_yes "$(m 'Edit /etc/resolv.conf directly?' '直接编辑 /etc/resolv.conf？')" || return 0
+  valid_ip_literal "$dns1" || { red "$(m 'Invalid nameserver 1. Use an IPv4 or IPv6 address.' 'Invalid nameserver 1. Use an IPv4 or IPv6 address.')"; return 1; }
+  valid_ip_literal "$dns2" || { red "$(m 'Invalid nameserver 2. Use an IPv4 or IPv6 address.' 'Invalid nameserver 2. Use an IPv4 or IPv6 address.')"; return 1; }
+  [ -L /etc/resolv.conf ] && { red "$(m '/etc/resolv.conf is a managed symbolic link. Use the systemd-resolved option or update the owning network manager instead.' '/etc/resolv.conf is a managed symbolic link. Use the systemd-resolved option or update the owning network manager instead.')"; return 1; }
+  yellow "$(m 'Direct /etc/resolv.conf edits may be overwritten by cloud-init, DHCP, NetworkManager, or systemd-resolved.' 'Direct /etc/resolv.conf edits may be overwritten by cloud-init, DHCP, NetworkManager, or systemd-resolved.')"
+  confirm_yes "$(m 'Edit /etc/resolv.conf directly?' 'Edit /etc/resolv.conf directly?')" || return 0
   backup_path /etc/resolv.conf >/dev/null
   cat > /etc/resolv.conf <<EOF2
 nameserver $dns1
@@ -1894,43 +1894,43 @@ dns_menu() {
   while true; do
     clear_screen
     title "DNS"
-    echo "1) $(m 'DNS audit' 'DNS 审计')"
-    echo "2) $(m 'Test common public resolvers' '测试常见公共 DNS')"
-    echo "3) $(m 'Apply via systemd-resolved' '通过 systemd-resolved 应用')"
-    echo "4) $(m 'Apply by direct /etc/resolv.conf edit' '直接编辑 /etc/resolv.conf')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    echo "1) $(m 'DNS audit' 'DNS audit')"
+    echo "2) $(m 'Test common public resolvers' 'Test common public resolvers')"
+    echo "3) $(m 'Apply via systemd-resolved' 'Apply via systemd-resolved')"
+    echo "4) $(m 'Apply by direct /etc/resolv.conf edit' 'Apply by direct /etc/resolv.conf edit')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) dns_audit; pause ;;
       2) dns_test; pause ;;
       3) dns_apply_resolved; pause ;;
       4) dns_apply_resolvconf; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
 # ---------- logs ----------
 logs_audit() {
-  section "$(m 'Logs audit' '日志审计')"
+  section "$(m 'Logs audit' 'Logs audit')"
   local journal_usage varlog_size
   if is_systemd; then
     journal_usage="$(journalctl --disk-usage 2>/dev/null | sed 's/^/ /')"
     kv "journald usage" "${journal_usage:-unknown}"
     if [ -f /etc/systemd/journald.conf.d/99-vps-init-size-limit.conf ]; then
-      status_ok "$(m 'vps-init journald size limit is configured.' 'vps-init journald 体积限制已配置。')"
+      status_ok "$(m 'vps-init journald size limit is configured.' 'vps-init journald size limit is configured.')"
     else
-      status_warn "$(m 'No vps-init journald limit found. Consider setting SystemMaxUse.' '未发现 vps-init journald 限额。建议设置 SystemMaxUse。')"
+      status_warn "$(m 'No vps-init journald limit found. Consider setting SystemMaxUse.' 'No vps-init journald limit found. Consider setting SystemMaxUse.')"
     fi
   else
-    status_warn "$(m 'systemd not detected; journald audit skipped.' '未检测到 systemd，跳过 journald 审计。')"
+    status_warn "$(m 'systemd not detected; journald audit skipped.' 'systemd not detected; journald audit skipped.')"
   fi
 
   varlog_size="$(du -sh /var/log 2>/dev/null | awk '{print $1}')"
   kv "/var/log size" "${varlog_size:-unknown}"
   echo
-  muted "  $(m 'Largest /var/log entries:' '/var/log 最大项目：')"
+  muted "  $(m 'Largest /var/log entries:' 'Largest /var/log entries:')"
   du -ah /var/log 2>/dev/null | sort -hr | head -8 | print_block || true
 }
 
@@ -1941,9 +1941,9 @@ logs_limit_journald() {
   system_max="$(input_default "SystemMaxUse" "200M")"
   runtime_max="$(input_default "RuntimeMaxUse" "100M")"
   retention="$(input_default "MaxRetentionSec" "7day")"
-  valid_systemd_size "$system_max" || { red "$(m 'Invalid SystemMaxUse. Use values such as 200M or 1G.' 'SystemMaxUse 无效。请使用 200M 或 1G 等格式。')"; return 1; }
-  valid_systemd_size "$runtime_max" || { red "$(m 'Invalid RuntimeMaxUse. Use values such as 100M or 1G.' 'RuntimeMaxUse 无效。请使用 100M 或 1G 等格式。')"; return 1; }
-  valid_systemd_timespan "$retention" || { red "$(m 'Invalid MaxRetentionSec. Use values such as 7day or 24h.' 'MaxRetentionSec 无效。请使用 7day 或 24h 等格式。')"; return 1; }
+  valid_systemd_size "$system_max" || { red "$(m 'Invalid SystemMaxUse. Use values such as 200M or 1G.' 'Invalid SystemMaxUse. Use values such as 200M or 1G.')"; return 1; }
+  valid_systemd_size "$runtime_max" || { red "$(m 'Invalid RuntimeMaxUse. Use values such as 100M or 1G.' 'Invalid RuntimeMaxUse. Use values such as 100M or 1G.')"; return 1; }
+  valid_systemd_timespan "$retention" || { red "$(m 'Invalid MaxRetentionSec. Use values such as 7day or 24h.' 'Invalid MaxRetentionSec. Use values such as 7day or 24h.')"; return 1; }
   mkdir -p /etc/systemd/journald.conf.d
   backup_path "$config_file" >/dev/null || return 1
   config_backup="$BACKUP_LAST_PATH"
@@ -1955,7 +1955,7 @@ MaxRetentionSec=$retention
 Compress=yes
 EOF2
   if ! systemctl restart systemd-journald; then
-    red "$(m 'Failed to restart systemd-journald. Restoring the previous configuration.' '重启 systemd-journald 失败，正在恢复之前的配置。')"
+    red "$(m 'Failed to restart systemd-journald. Restoring the previous configuration.' 'Failed to restart systemd-journald. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
     systemctl restart systemd-journald 2>/dev/null || true
     return 1
@@ -1966,9 +1966,9 @@ EOF2
 logs_vacuum() {
   require_systemd || return 1
   local size
-  size="$(input_default "$(m 'Vacuum journal down to size' '清理 journald 到指定大小')" "200M")"
-  valid_systemd_size "$size" || { red "$(m 'Invalid journal vacuum size. Use values such as 200M or 1G.' 'journald 清理大小无效。请使用 200M 或 1G 等格式。')"; return 1; }
-  confirm_yes "$(m "Vacuum journald logs to $size?" "将 journald 日志清理到 $size？")" || return 0
+  size="$(input_default "$(m 'Vacuum journal down to size' 'Vacuum journal down to size')" "200M")"
+  valid_systemd_size "$size" || { red "$(m 'Invalid journal vacuum size. Use values such as 200M or 1G.' 'Invalid journal vacuum size. Use values such as 200M or 1G.')"; return 1; }
+  confirm_yes "$(m "Vacuum journald logs to $size?" "Vacuum journald logs to $size?")" || return 0
   journalctl --vacuum-size="$size"
   journalctl --disk-usage || true
 }
@@ -1976,25 +1976,25 @@ logs_vacuum() {
 logs_menu() {
   while true; do
     clear_screen
-    title "$(m 'Logs' '日志')"
-    echo "1) $(m 'Logs audit' '日志审计')"
-    echo "2) $(m 'Limit journald size' '限制 journald 大小')"
-    echo "3) $(m 'Vacuum journald now' '立即清理 journald')"
-    echo "0) $(m 'Back' '返回')"
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    title "$(m 'Logs' 'Logs')"
+    echo "1) $(m 'Logs audit' 'Logs audit')"
+    echo "2) $(m 'Limit journald size' 'Limit journald size')"
+    echo "3) $(m 'Vacuum journald now' 'Vacuum journald now')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) logs_audit; pause ;;
       2) logs_limit_journald; pause ;;
       3) logs_vacuum; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
 audit_all() {
   clear_screen
-  title "$(m 'Full Environment Audit' '完整环境审计')"
+  title "$(m 'Full Environment Audit' 'Full Environment Audit')"
   load_os_release
   kv "Time" "$(date '+%F %T %Z')"
   kv "Host" "$(hostname)"
@@ -2010,22 +2010,22 @@ audit_all() {
   dns_audit || true
   logs_audit || true
 
-  section "$(m 'Summary' '总结')"
-  status_info "$(m 'Audit mode is read-only. No settings were changed.' '审计模式是只读的，没有修改任何设置。')"
-  status_info "$(m 'Use the individual module menus to apply changes with confirmation.' '如需修改，请进入对应模块并确认后应用。')"
+  section "$(m 'Summary' 'Summary')"
+  status_info "$(m 'Audit mode is read-only. No settings were changed.' 'Audit mode is read-only. No settings were changed.')"
+  status_info "$(m 'Use the individual module menus to apply changes with confirmation.' 'Use the individual module menus to apply changes with confirmation.')"
 }
 
 low_risk_baseline() {
   local mode="${1:-interactive}" failures=0
-  yellow "$(m 'Low-risk baseline includes: basic tools, BBR if supported, memory profile, proxy sysctl, nofile, journald limit.' '低风险基线包括：基础工具、BBR（如支持）、内存配置、代理 sysctl、nofile、journald 限额。')"
-  yellow "$(m 'It does NOT change SSH, UFW, DNS, Fail2ban, swapfile, or ZRAM.' '它不会修改 SSH、UFW、DNS、Fail2ban、swapfile 或 ZRAM。')"
+  yellow "$(m 'Low-risk baseline includes: basic tools, BBR if supported, memory profile, proxy sysctl, nofile, journald limit.' 'Low-risk baseline includes: basic tools, BBR if supported, memory profile, proxy sysctl, nofile, journald limit.')"
+  yellow "$(m 'It does NOT change SSH, UFW, DNS, Fail2ban, swapfile, or ZRAM.' 'It does NOT change SSH, UFW, DNS, Fail2ban, swapfile, or ZRAM.')"
   log_action "baseline" "start mode=$mode"
-  confirm_yes "$(m 'Run low-risk baseline?' '执行低风险基线？')" || return 0
+  confirm_yes "$(m 'Run low-risk baseline?' 'Run low-risk baseline?')" || return 0
   if ! install_basic_tools; then failures=$((failures + 1)); fi
   if bbr_supported; then
     if ! enable_bbr; then failures=$((failures + 1)); fi
   else
-    status_info "$(m 'BBR is not supported; baseline skipped it.' '当前不支持 BBR；基线已跳过。')"
+    status_info "$(m 'BBR is not supported; baseline skipped it.' 'BBR is not supported; baseline skipped it.')"
   fi
   if ! apply_memory_sysctl "$(recommend_swappiness)" "50"; then failures=$((failures + 1)); fi
   if ! apply_proxy_sysctl; then failures=$((failures + 1)); fi
@@ -2033,11 +2033,11 @@ low_risk_baseline() {
   if ! logs_limit_journald; then failures=$((failures + 1)); fi
   if [ "$failures" -gt 0 ]; then
     log_action "baseline" "partial-failure mode=$mode failures=$failures"
-    red "$(m "Baseline completed with $failures failed step(s). Review the output before rebooting." "基线执行完成，但有 $failures 个步骤失败。重启前请检查输出。")"
+    red "$(m "Baseline completed with $failures failed step(s). Review the output before rebooting." "Baseline completed with $failures failed step(s). Review the output before rebooting."). Review the output before rebooting.")"
     return 1
   fi
   log_action "baseline" "complete mode=$mode"
-  green "$(m 'Baseline complete. Reboot is recommended.' '基线执行完成。建议重启。')"
+  green "$(m 'Baseline complete. Reboot is recommended.' 'Baseline complete. Reboot is recommended.')"
 }
 
 list_backups() {
@@ -2047,13 +2047,13 @@ list_backups() {
 
 language_menu() {
   echo "1) English"
-  echo "2) 中文"
+  echo "2) Chinese"
   read -r -p "Choose [1/2]: " ans || true
   case "$ans" in
-    2|cn|CN|zh|中文) LANG_MODE="cn" ;;
+    2|cn|CN|zh|chinese|Chinese) LANG_MODE="cn" ;;
     *) LANG_MODE="en" ;;
   esac
-  green "$(m 'Language switched to English.' '语言已切换为中文。')"
+  green "$(m 'Language switched to English.' 'Language switched to English.')"
 }
 
 show_help() {
@@ -2084,7 +2084,7 @@ Commands:
 Options:
   --yes, -y          Auto-confirm prompts for non-interactive commands.
   --lang en|cn       Set output language.
-  --ports LIST       Cloudflare ports for --ufw-cf-sync, default: 80,443.
+  --ports LIST       Cloudflare ports for --ufw-cf-sync, default: 80,443; comma-separated single ports only, no ranges.
 
 Environment:
   VPS_INIT_YES=1
@@ -2133,7 +2133,7 @@ handle_cli() {
         cmd="$1"
         ;;
       *)
-        red "$(m "Unknown argument: $1" "未知参数：$1")"
+        red "$(m "Unknown argument: $1" "Unknown argument: $1")"
         show_help
         exit 2
         ;;
@@ -2180,24 +2180,24 @@ main_menu() {
   while true; do
     clear_screen
     title "$SCRIPT_NAME $TOOL_VERSION"
-    echo "1) $(m 'Full environment audit' '完整环境审计')"
-    echo "2) $(m 'System status' '系统状态')"
-    echo "3) $(m 'Memory / Swap / ZRAM' '内存 / Swap / ZRAM')"
+    echo "1) $(m 'Full environment audit' 'Full environment audit')"
+    echo "2) $(m 'System status' 'System status')"
+    echo "3) $(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
     echo "4) SSH"
-    echo "5) $(m 'UFW Firewall / Cloudflare ranges' 'UFW 防火墙 / Cloudflare 网段')"
+    echo "5) $(m 'UFW Firewall / Cloudflare ranges' 'UFW Firewall / Cloudflare ranges')"
     echo "6) Fail2ban"
     echo "7) DNS"
-    echo "8) $(m 'Logs / journald' '日志 / journald')"
-    echo "9) $(m 'Enable BBR' '启用 BBR')"
-    echo "10) $(m 'Proxy sysctl tuning' '代理机 sysctl 优化')"
-    echo "11) $(m 'Raise nofile limits' '提高 nofile 限制')"
-    echo "12) $(m 'Install basic tools' '安装基础工具')"
-    echo "13) $(m 'Run low-risk baseline' '执行低风险基线')"
-    echo "14) $(m 'List config backups' '列出配置备份')"
-    echo "15) $(m 'Switch language' '切换语言')"
-    echo "0) $(m 'Exit' '退出')"
+    echo "8) $(m 'Logs / journald' 'Logs / journald')"
+    echo "9) $(m 'Enable BBR' 'Enable BBR')"
+    echo "10) $(m 'Proxy sysctl tuning' 'Proxy sysctl tuning')"
+    echo "11) $(m 'Raise nofile limits' 'Raise nofile limits')"
+    echo "12) $(m 'Install basic tools' 'Install basic tools')"
+    echo "13) $(m 'Run low-risk baseline' 'Run low-risk baseline')"
+    echo "14) $(m 'List config backups' 'List config backups')"
+    echo "15) $(m 'Switch language' 'Switch language')"
+    echo "0) $(m 'Exit' 'Exit')"
     echo
-    read -r -p "$(m 'Choose: ' '请选择：')" c
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
       1) audit_all; pause ;;
       2) show_system_status; pause ;;
@@ -2215,7 +2215,7 @@ main_menu() {
       14) list_backups; pause ;;
       15) language_menu; pause ;;
       0) exit 0 ;;
-      *) yellow "$(m 'Invalid choice' '无效选项')"; pause ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }

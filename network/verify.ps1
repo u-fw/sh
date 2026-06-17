@@ -19,6 +19,9 @@ function Check-NotContains([string]$File, [string]$Pattern, [string]$Message) {
   }
 }
 
+$MojibakePattern = '(\u569C|\u5910|\u59AB|\u5BB8|\u6220|\u6D93|\u6D94|\u6DC7|\u6FB6|\u6FC2|\u7039|\u7459|\u7481|\u7487|\u7CB6|\u7ED4|\u7EEF|\u8364|\u9286|\u934A|\u934F|\u9350|\u9353|\u9354|\u9359|\u935A|\u9366|\u9369|\u93BA|\u93C0|\u93C3|\u93C7|\u93C8|\u9422|\u9429|\u947A|\u95AB|\u95B0|\u95C3|\u95C4|\u951B|\u650C|\u7AD4|\u59A4|\u7EFE)'
+$ReplacementCharPattern = '\uFFFD'
+
 function Check-NotExactLine([string]$File, [string]$Exact, [string]$Message) {
   $lines = Get-Content -LiteralPath $File
   if ($lines -contains $Exact) {
@@ -37,7 +40,9 @@ if ($vpsCount -ne 1) {
   Fail "expected exactly one vps_init_tool*.sh, found $vpsCount"
 }
 
-Check-Contains 'vps_init_tool.sh' 'TOOL_VERSION="1\.0\.12"' 'vps_init_tool.sh version drifted'
+Check-Contains 'vps_init_tool.sh' 'TOOL_VERSION="1\.0\.14"' 'vps_init_tool.sh version drifted'
+Check-NotContains 'vps_init_tool.sh' $MojibakePattern 'vps_init_tool.sh must not contain mojibake Chinese text'
+Check-NotContains 'vps_init_tool.sh' $ReplacementCharPattern 'vps_init_tool.sh must not contain replacement characters from partial text recovery'
 Check-NotContains 'vps_init_tool.sh' '3x-ui|x-ui|1stream\.dat' 'vps_init_tool.sh must stay focused on generic VPS initialization'
 Check-Contains 'vps_init_tool.sh' 'handle_cli\(\)' 'vps_init_tool.sh missing CLI dispatcher'
 Check-Contains 'vps_init_tool.sh' 'package_manager_detect\(\)' 'vps_init_tool.sh missing package manager compatibility detector'
@@ -73,6 +78,7 @@ Check-Contains 'vps_init_tool.sh' '--dns-audit\) dns_audit ;;' 'vps_init_tool.sh
 Check-Contains 'vps_init_tool.sh' '--logs-audit\) logs_audit ;;' 'vps_init_tool.sh logs audit CLI must call logs_audit'
 Check-Contains 'vps_init_tool.sh' '--list-backups\) list_backups ;;' 'vps_init_tool.sh backup listing CLI must call list_backups'
 Check-Contains 'vps_init_tool.sh' 'ufw_parse_cloudflare_ports "\$UFW_CF_PORTS" \|\| \{ red "Invalid --ports value: \$UFW_CF_PORTS"; show_help; exit 2; \}' 'vps_init_tool.sh CLI must validate --ports before running Cloudflare sync'
+Check-Contains 'vps_init_tool.sh' 'comma-separated single ports only, no ranges' 'vps_init_tool.sh help must explain --ports format'
 Check-Contains 'vps_init_tool.sh' 'Missing value for --lang' 'vps_init_tool.sh CLI must report a missing --lang value'
 Check-Contains 'vps_init_tool.sh' 'Missing value for --ports' 'vps_init_tool.sh CLI must report a missing --ports value'
 Check-Contains 'vps_init_tool.sh' 'Only one command may be specified' 'vps_init_tool.sh CLI must reject multiple commands'
@@ -209,7 +215,7 @@ Check-NotContains 'vps_init_tool.sh' 'fail2ban-client set "\$jail" unbanip "\$ip
 Check-Contains 'vps_init_tool.sh' 'valid_ip_literal "\$ip"' 'vps_init_tool.sh must validate Fail2ban unban IP addresses'
 Check-Contains 'vps_init_tool.sh' 'Invalid IP to unban' 'vps_init_tool.sh must report invalid Fail2ban unban IP addresses'
 
-Check-Contains 'freedom.sh' 'SCRIPT_VERSION="v9\.11-xray"' 'freedom.sh version drifted'
+Check-Contains 'freedom.sh' 'SCRIPT_VERSION="v9\.17-xray"' 'freedom.sh version drifted'
 Check-Contains 'freedom.sh' 'DEFAULT_SNI="v1-dy\.ixigua\.com"' 'freedom.sh default SNI drifted'
 Check-Contains 'freedom.sh' 'ensure_xray_installed\(\)' 'freedom.sh must install/configure Xray-core only'
 Check-Contains 'freedom.sh' 'write_xray_config\(\)' 'freedom.sh missing Xray config writer'
@@ -287,11 +293,25 @@ Check-Contains 'freedom.sh' 'FREEDOM_TLS_CERT_MODE=' 'freedom.sh missing TLS cer
 Check-Contains 'freedom.sh' 'normalize_deploy_mode\(\)' 'freedom.sh missing deployment mode normalizer'
 Check-Contains 'freedom.sh' 'normalize_tls_cert_mode\(\)' 'freedom.sh missing TLS certificate mode normalizer'
 Check-Contains 'freedom.sh' 'normalize_xhttp_alpn_choice\(\)' 'freedom.sh missing XHTTP ALPN normalizer'
+Check-Contains 'freedom.sh' 'warn_cloudflare_origin_ca_scope\(\)' 'freedom.sh missing reusable Cloudflare Origin CA warning helper'
+Check-Contains 'freedom.sh' 'Cloudflare Origin CA requires Cloudflare proxy with Full\(strict\)' 'freedom.sh must clearly explain Cloudflare Origin CA trust scope'
+Check-Contains 'freedom.sh' 'CDN mode defaults the share address to the TLS/SNI domain' 'freedom.sh CDN mode must avoid defaulting share links to the origin IP'
+Check-Contains 'freedom.sh' 'Use --server for a preferred CDN IP or hostname' 'freedom.sh CDN mode must explain explicit CDN share address override'
+Check-Contains 'freedom.sh' 'CDN XHTTP TLS mode will default the share address to the TLS/SNI domain' 'freedom.sh preflight must preview CDN share address default'
+Check-Contains 'freedom.sh' 'REALITY target SNI or XHTTP-TLS certificate/SNI domain' 'freedom.sh help must describe SNI semantics for both deploy modes'
+Check-Contains 'freedom.sh' 'In XHTTP-TLS mode, omit this to use SNI; set it for preferred CDN IP/hostname' 'freedom.sh help must explain CDN mode --server semantics'
 Check-Contains 'freedom.sh' 'Certificate profile: 1=PUBLIC CA, 2=CLOUDFLARE ORIGIN CA' 'freedom.sh TLS certificate prompt must support polished numeric choices'
 Check-Contains 'freedom.sh' 'ALPN profile: 1=STABLE \(H2\+HTTP/1\.1\), 2=H2 ONLY, 3=H3 ONLY \(UDP/443\)' 'freedom.sh ALPN prompt must support stable, H2-only, and H3-only choices'
+Check-Contains 'freedom.sh' 'STABLE keeps the XHTTP server on TCP H1/H2' 'freedom.sh help must explain the stable XHTTP ALPN default'
+Check-Contains 'freedom.sh' 'Direct H3 makes Xray listen on UDP/443' 'freedom.sh help/preflight must warn about direct Xray H3'
+Check-Contains 'freedom.sh' 'Prefer real Nginx/Caddy/CDN fronting for H3' 'freedom.sh H3 warning should recommend fronting direct H3'
 Check-Contains 'freedom.sh' 'validate_xhttp_path\(\)' 'freedom.sh missing XHTTP path validator'
 Check-Contains 'freedom.sh' 'xhttp_alpn_profile_json\(\)' 'freedom.sh missing XHTTP ALPN profile helper'
-Check-Contains 'freedom.sh' 'validate_tls_cert_files\(\)' 'freedom.sh missing TLS certificate file validator'
+Check-Contains 'freedom.sh' 'check_tls_cert_files\(\)' 'freedom.sh missing non-fatal TLS certificate checker'
+Check-Contains 'freedom.sh' 'validate_tls_cert_files\(\)' 'freedom.sh missing fatal TLS certificate validation wrapper'
+Check-Contains 'freedom.sh' 'openssl is required to validate TLS certificate files' 'freedom.sh TLS certificate checker must fail clearly when openssl is missing'
+Check-Contains 'freedom.sh' 'check_tls_cert_files \|\| fatal "TLS certificate validation failed"' 'freedom.sh deploy-time TLS cert validator must fail hard through wrapper'
+Check-Contains 'freedom.sh' 'check_tls_cert_files \|\| failures=\$\(\(failures \+ 1\)\)' 'freedom.sh preflight must use non-fatal TLS certificate checks'
 Check-Contains 'freedom.sh' 'domain_matches_certificate_name\(\)' 'freedom.sh missing TLS certificate domain matcher'
 Check-Contains 'freedom.sh' 'cert_covers_domain\(\)' 'freedom.sh missing TLS certificate SAN/CN coverage checker'
 Check-Contains 'freedom.sh' 'openssl x509 -checkend 0 -noout -in "\$TLS_CERT_FILE"' 'freedom.sh must reject expired TLS certificates'
@@ -308,7 +328,7 @@ Check-Contains 'freedom.sh' 'clients: \[ \{ id: \$uuid \} \]' 'freedom.sh CDN mo
 Check-Contains 'freedom.sh' 'type=xhttp' 'freedom.sh CDN share link must use XHTTP type'
 Check-Contains 'freedom.sh' 'security=tls' 'freedom.sh CDN share link must use TLS security'
 Check-Contains 'freedom.sh' 'mode=auto' 'freedom.sh CDN share link should use XHTTP auto mode'
-Check-Contains 'freedom.sh' 'Cloudflare Origin CA certificates are only trusted by Cloudflare' 'freedom.sh must warn about Cloudflare Origin CA trust scope'
+Check-Contains 'freedom.sh' 'Cloudflare Origin CA requires Cloudflare proxy with Full\(strict\)' 'freedom.sh must warn about Cloudflare Origin CA trust scope'
 Check-Contains 'freedom.sh' 'validate_generated_config "\$tmp"' 'freedom.sh must validate generated temp config before installing it'
 Check-Contains 'freedom.sh' '"\$BIN" run -test -c "\$config_file"' 'freedom.sh temp config validation must use xray run -test before install'
 Check-Contains 'freedom.sh' 'H2 is recommended, not mandatory' 'freedom.sh must treat missing H2 as a warning instead of a hard failure'

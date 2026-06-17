@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v9.11-xray
+# freedom.sh v9.17-xray
 # VLESS + REALITY 自动配置脚本
 # - 专精 Xray-core；未安装时可使用 XTLS 官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
@@ -21,7 +21,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.11-xray"
+SCRIPT_VERSION="v9.17-xray"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 DEFAULT_NODE_NAME="Premium-Node"
@@ -196,18 +196,27 @@ cert_covers_domain() {
   [[ -n "$cn" ]] && domain_matches_certificate_name "$domain" "$cn"
 }
 
-validate_tls_cert_files() {
+check_tls_cert_files() {
   local cert_pub key_pub
-  [[ -r "$TLS_CERT_FILE" ]] || fatal "TLS certificate file not readable: $TLS_CERT_FILE"
-  [[ -r "$TLS_KEY_FILE" ]] || fatal "TLS private key file not readable: $TLS_KEY_FILE"
-  openssl x509 -in "$TLS_CERT_FILE" -noout >/dev/null 2>&1 || fatal "Invalid TLS certificate file: $TLS_CERT_FILE"
-  openssl pkey -in "$TLS_KEY_FILE" -noout >/dev/null 2>&1 || fatal "Invalid TLS private key file: $TLS_KEY_FILE"
-  openssl x509 -checkend 0 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1 || fatal "TLS certificate is expired: $TLS_CERT_FILE"
+  command -v openssl >/dev/null 2>&1 || { warn "openssl is required to validate TLS certificate files."; return 1; }
+  [[ -r "$TLS_CERT_FILE" ]] || { warn "TLS certificate file not readable: $TLS_CERT_FILE"; return 1; }
+  [[ -r "$TLS_KEY_FILE" ]] || { warn "TLS private key file not readable: $TLS_KEY_FILE"; return 1; }
+  openssl x509 -in "$TLS_CERT_FILE" -noout >/dev/null 2>&1 || { warn "Invalid TLS certificate file: $TLS_CERT_FILE"; return 1; }
+  openssl pkey -in "$TLS_KEY_FILE" -noout >/dev/null 2>&1 || { warn "Invalid TLS private key file: $TLS_KEY_FILE"; return 1; }
+  openssl x509 -checkend 0 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1 || { warn "TLS certificate is expired: $TLS_CERT_FILE"; return 1; }
   openssl x509 -checkend 1209600 -noout -in "$TLS_CERT_FILE" >/dev/null 2>&1 || warn "TLS certificate expires within 14 days: $TLS_CERT_FILE"
   cert_pub="$(openssl x509 -in "$TLS_CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
   key_pub="$(openssl pkey -in "$TLS_KEY_FILE" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
-  [[ -n "$cert_pub" && -n "$key_pub" && "$cert_pub" == "$key_pub" ]] || fatal "TLS private key does not match certificate"
-  cert_covers_domain "$TLS_CERT_FILE" "$SNI" || fatal "TLS certificate does not cover SNI domain: $SNI"
+  [[ -n "$cert_pub" && -n "$key_pub" && "$cert_pub" == "$key_pub" ]] || { warn "TLS private key does not match certificate"; return 1; }
+  cert_covers_domain "$TLS_CERT_FILE" "$SNI" || { warn "TLS certificate does not cover SNI domain: $SNI"; return 1; }
+}
+
+validate_tls_cert_files() {
+  check_tls_cert_files || fatal "TLS certificate validation failed"
+}
+
+warn_cloudflare_origin_ca_scope() {
+  warn "Cloudflare Origin CA requires Cloudflare proxy with Full(strict); direct clients and browsers will not trust this certificate."
 }
 
 clear_screen() {
@@ -963,18 +972,26 @@ preflight_check() {
   fi
 
   if [[ "$DEPLOY_MODE" == "cdn-xhttp-tls" ]]; then
+    if [[ -z "$host" ]]; then
+      info "CDN XHTTP TLS mode will default the share address to the TLS/SNI domain. Use --server for a preferred CDN IP or hostname."
+    fi
     if [[ -n "$XHTTP_PATH" ]]; then
       validate_xhttp_path "$XHTTP_PATH" || { warn "Invalid XHTTP path: $XHTTP_PATH"; failures=$((failures + 1)); }
     fi
     if XHTTP_ALPN_JSON="$(xhttp_alpn_profile_json "$XHTTP_ALPN_CHOICE")"; then
       XHTTP_ALPN_CHOICE="$(normalize_xhttp_alpn_choice "$XHTTP_ALPN_CHOICE")"
       ok "XHTTP ALPN profile looks valid: $XHTTP_ALPN_CHOICE => $XHTTP_ALPN_JSON"
+      info "STABLE keeps the XHTTP server on TCP H1/H2; clients/CDNs may still use H3 before converting to H1/H2 origin traffic."
+      if [[ "$XHTTP_ALPN_CHOICE" == "h3" ]]; then
+        warn "Direct H3 makes Xray listen on UDP/443. Prefer real Nginx/Caddy/CDN fronting for H3 to reduce fingerprint risk."
+      fi
     else
       warn "Invalid XHTTP ALPN profile: $XHTTP_ALPN_CHOICE"
       failures=$((failures + 1))
     fi
     if TLS_CERT_MODE="$(normalize_tls_cert_mode "$TLS_CERT_MODE")"; then
       ok "TLS cert mode looks valid: $TLS_CERT_MODE"
+      [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]] && warn_cloudflare_origin_ca_scope
     else
       warn "Invalid TLS cert mode: $TLS_CERT_MODE"
       failures=$((failures + 1))
@@ -983,7 +1000,7 @@ preflight_check() {
       warn "CDN XHTTP TLS mode requires --tls-cert-file and --tls-key-file."
       failures=$((failures + 1))
     else
-      validate_tls_cert_files || failures=$((failures + 1))
+      check_tls_cert_files || failures=$((failures + 1))
     fi
   fi
 
@@ -1088,7 +1105,11 @@ read_common_inputs() {
   info "CN/private 阻断路由：已默认启用。"
 
   SERVER_IP="${CLI_SERVER:-}"
-  if [[ -z "$SERVER_IP" ]]; then
+  if [[ -z "$SERVER_IP" && "$DEPLOY_MODE" == "cdn-xhttp-tls" ]]; then
+    SERVER_IP="$(input_default "CDN address/domain for share link" "$SNI")"
+    auto_detected_server=0
+    info "CDN mode defaults the share address to the TLS/SNI domain. Use --server for a preferred CDN IP or hostname."
+  elif [[ -z "$SERVER_IP" ]]; then
     SERVER_IP="$(get_public_ip)"
     auto_detected_server=1
   fi
@@ -1115,7 +1136,7 @@ read_common_inputs() {
     cert_mode_input="$(input_default "Certificate profile: 1=PUBLIC CA, 2=CLOUDFLARE ORIGIN CA" "$cert_mode_default")"
     TLS_CERT_MODE="$(normalize_tls_cert_mode "$cert_mode_input")" || fatal "Invalid TLS cert mode: $cert_mode_input"
     if [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]]; then
-      warn "Cloudflare Origin CA certificates are only trusted by Cloudflare in Full(strict); direct browser access will not trust them."
+      warn_cloudflare_origin_ca_scope
     fi
 
     TLS_CERT_FILE="$(input_default "TLS certificate file path" "$TLS_CERT_FILE")"
@@ -1131,7 +1152,7 @@ read_common_inputs() {
     XHTTP_ALPN_CHOICE="$(normalize_xhttp_alpn_choice "$alpn_input")" || fatal "Invalid XHTTP ALPN profile: $alpn_input"
     XHTTP_ALPN_JSON="$(xhttp_alpn_profile_json "$XHTTP_ALPN_CHOICE")" || fatal "Invalid XHTTP ALPN profile: $XHTTP_ALPN_CHOICE"
     if [[ "$XHTTP_ALPN_CHOICE" == "h3" ]]; then
-      warn "H3 requires UDP/443 reachability and CDN support. Use stable for the broadest CDN compatibility."
+      warn "Direct H3 makes Xray listen on UDP/443. Prefer real Nginx/Caddy/CDN fronting for H3 to reduce fingerprint risk."
     fi
   fi
 }
@@ -1567,6 +1588,7 @@ print_result() {
     info "XHTTP path: ${XHTTP_PATH}"
     info "XHTTP ALPN: ${XHTTP_ALPN_CHOICE} ${XHTTP_ALPN_JSON}"
     info "Certificate profile: ${TLS_CERT_MODE}"
+    [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]] && warn_cloudflare_origin_ca_scope
     info "Node name: ${NODE_NAME}"
     info "CN/private route: enabled; unmatched traffic uses the default direct outbound"
     info "Link length: ${#link} chars"
@@ -1639,13 +1661,16 @@ With any deployment option, runs non-interactively using defaults for omitted va
 
 Options:
   --port PORT                     Listen port. Default: ${DEFAULT_PORT}.
-  --sni DOMAIN                    REALITY SNI/handshake domain. Default: ${DEFAULT_SNI}.
+  --sni DOMAIN                    REALITY target SNI or XHTTP-TLS certificate/SNI domain. Default: ${DEFAULT_SNI}.
   --node-name NAME                Share link node name. Default: ${DEFAULT_NODE_NAME}.
   --server HOST_OR_IP             Public server address for the share link.
+                                  In XHTTP-TLS mode, omit this to use SNI; set it for preferred CDN IP/hostname.
   --mode MODE                     1/REALITY-VISION or 2/XHTTP-TLS. Default: REALITY-VISION.
   --cdn-xhttp-tls                 Shortcut for --mode XHTTP-TLS.
   --xhttp-path PATH               XHTTP request path for CDN mode.
   --xhttp-alpn PROFILE            1/STABLE, 2/H2 ONLY, or 3/H3 ONLY. Default: STABLE.
+                                  STABLE keeps the XHTTP server on TCP H1/H2; clients/CDNs may still use H3 before origin.
+                                  Direct H3 makes Xray listen on UDP/443; Prefer real Nginx/Caddy/CDN fronting for H3.
   --tls-cert-file PATH            TLS certificate file for CDN mode.
   --tls-key-file PATH             TLS private key file for CDN mode.
   --tls-cert-mode MODE            1/PUBLIC CA or 2/CLOUDFLARE ORIGIN CA. Default: PUBLIC CA.
