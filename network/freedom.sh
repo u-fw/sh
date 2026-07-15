@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# freedom.sh v9.17-xray
-# VLESS + REALITY 自动配置脚本
+# freedom.sh v10.2-xray
+# VLESS + REALITY-VISION / XHTTP-TLS-VISION 自动配置脚本
 # - 专精 Xray-core；未安装时可使用 XTLS 官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
 # - CN/private 阻断默认启用；未命中规则的流量走默认 direct 出站
 # - 二维码默认不生成，最后按需生成，避免长链接导致 qrencode 报错
 # - 启动前检测端口占用；非 xray 进程占用时明确报错
-# - 写入配置前自动备份；检查/启动失败时可交互恢复备份
+# - 写入配置前自动备份；非交互失败自动回滚，首次部署失败自动清理
 # - 隐藏服务端私钥等敏感输出；公网 IP 优先使用 api.ip.sb/ip
 # - 端口占用报错会明确显示进程名、PID 与监听地址
 # - ML-DSA pqv 链接参数做 URL 编码；自动补齐 ss/iproute2 端口检测依赖
 
 set -Eeuo pipefail
+umask 077
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -21,7 +22,7 @@ NC='\033[0m'
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v9.17-xray"
+SCRIPT_VERSION="v10.2-xray"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 DEFAULT_NODE_NAME="Premium-Node"
@@ -45,9 +46,9 @@ MLDSA_SEED=""
 MLDSA_VERIFY=""
 MLDSA_LINK_PARAM=""
 SPIDER_X=""
-BLOCK_CN="true"
 NODE_NAME=""
 BACKUP_FILE=""
+CONFIG_WRITTEN_THIS_RUN=0
 ASSUME_YES="${FREEDOM_YES:-0}"
 NONINTERACTIVE=0
 NO_QR="${FREEDOM_NO_QR:-0}"
@@ -60,13 +61,19 @@ XRAY_ENCRYPTION_CHOICE="${FREEDOM_XRAY_ENCRYPTION:-x25519}"
 ENABLE_MLDSA="${FREEDOM_MLDSA:-0}"
 SNI_CHECK="${FREEDOM_SNI_CHECK:-1}"
 SNI_CHECK_TIMEOUT="${FREEDOM_SNI_CHECK_TIMEOUT:-8}"
+ASN_CHECK="${FREEDOM_ASN_CHECK:-1}"
+ALLOW_NONSTANDARD_REALITY_PORT="${FREEDOM_ALLOW_NONSTANDARD_REALITY_PORT:-0}"
+UPDATE_XRAY="${FREEDOM_UPDATE_XRAY:-0}"
+LAST_SNI_REMOTE_IP=""
 DEPLOY_MODE="${FREEDOM_MODE:-reality}"
 TLS_CERT_MODE="${FREEDOM_TLS_CERT_MODE:-public}"
 TLS_CERT_FILE="${FREEDOM_TLS_CERT_FILE:-}"
 TLS_KEY_FILE="${FREEDOM_TLS_KEY_FILE:-}"
 XHTTP_PATH="${FREEDOM_XHTTP_PATH:-}"
-XHTTP_ALPN_CHOICE="${FREEDOM_XHTTP_ALPN:-stable}"
-XHTTP_ALPN_JSON='["h2","http/1.1"]'
+XHTTP_TRANSPORT_PROFILE="${FREEDOM_XHTTP_PROFILE:-${FREEDOM_XHTTP_ALPN:-cdn-stable}}"
+XHTTP_ORIGIN_ALPN_JSON='["h2","http/1.1"]'
+XHTTP_CLIENT_ALPN_JSON='["h2","http/1.1"]'
+ROUTE_PROFILE="${FREEDOM_ROUTE_PROFILE:-compatible}"
 
 info() { echo -e "${CYAN}[INFO] $*${NC}"; }
 ok() { echo -e "${GREEN}[OK] $*${NC}"; }
@@ -91,7 +98,7 @@ normalize_deploy_mode() {
     1|reality|REALITY|reality-vision|REALITY-VISION|raw-reality|RAW-REALITY|raw-reality-vision|RAW-REALITY-VISION|vision|VISION)
       printf '%s\n' "reality"
       ;;
-    2|cdn|CDN|xhttp|XHTTP|xhttp-tls|XHTTP-TLS|cdn-xhttp-tls|CDN-XHTTP-TLS)
+    2|cdn|CDN|xhttp|XHTTP|xhttp-tls|XHTTP-TLS|xhttp-tls-vision|XHTTP-TLS-VISION|cdn-xhttp-tls|CDN-XHTTP-TLS)
       printf '%s\n' "cdn-xhttp-tls"
       ;;
     *)
@@ -108,17 +115,17 @@ validate_xhttp_path() {
   [[ "$path" =~ ^/[A-Za-z0-9._~/%-]+$ ]] || return 1
 }
 
-xhttp_alpn_profile_json() {
+xhttp_origin_alpn_json() {
   local choice
-  choice="$(normalize_xhttp_alpn_choice "${1:-stable}")" || return 1
+  choice="$(normalize_xhttp_transport_profile "${1:-cdn-stable}")" || return 1
   case "$choice" in
-    stable)
+    cdn-stable|cdn-h3)
       printf '%s\n' '["h2","http/1.1"]'
       ;;
-    h2)
+    cdn-h2)
       printf '%s\n' '["h2"]'
       ;;
-    h3)
+    direct-h3)
       printf '%s\n' '["h3"]'
       ;;
     *)
@@ -127,21 +134,99 @@ xhttp_alpn_profile_json() {
   esac
 }
 
-normalize_xhttp_alpn_choice() {
-  case "${1:-stable}" in
-    1|stable|STABLE|h2-http1|H2-HTTP1|h2,http/1.1)
-      printf '%s\n' "stable"
+xhttp_client_alpn_json() {
+  local choice
+  choice="$(normalize_xhttp_transport_profile "${1:-cdn-stable}")" || return 1
+  case "$choice" in
+    cdn-stable)
+      printf '%s\n' '["h2","http/1.1"]'
       ;;
-    2|h2|H2|h2-only|H2-ONLY)
-      printf '%s\n' "h2"
+    cdn-h2)
+      printf '%s\n' '["h2"]'
       ;;
-    3|h3|H3|h3-only|H3-ONLY|quic|QUIC)
-      printf '%s\n' "h3"
+    cdn-h3|direct-h3)
+      printf '%s\n' '["h3"]'
       ;;
     *)
       return 1
       ;;
   esac
+}
+
+normalize_xhttp_transport_profile() {
+  case "${1:-cdn-stable}" in
+    1|stable|STABLE|cdn-stable|CDN-STABLE|h2-http1|H2-HTTP1|h2,http/1.1)
+      printf '%s\n' "cdn-stable"
+      ;;
+    2|h2|H2|h2-only|H2-ONLY|cdn-h2|CDN-H2)
+      printf '%s\n' "cdn-h2"
+      ;;
+    3|cdn-h3|CDN-H3|edge-h3|EDGE-H3)
+      printf '%s\n' "cdn-h3"
+      ;;
+    4|h3|H3|h3-only|H3-ONLY|quic|QUIC|direct-h3|DIRECT-H3)
+      printf '%s\n' "direct-h3"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_route_profile() {
+  case "${1:-compatible}" in
+    1|compatible|COMPATIBLE|asis|AsIs|ASIS)
+      printf '%s\n' "compatible"
+      ;;
+    2|strict|STRICT|ip-if-non-match|IPIfNonMatch|ipifnonmatch)
+      printf '%s\n' "strict"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+routing_domain_strategy() {
+  case "$(normalize_route_profile "${1:-compatible}")" in
+    compatible) printf '%s\n' "AsIs" ;;
+    strict) printf '%s\n' "IPIfNonMatch" ;;
+  esac
+}
+
+cloudflare_https_port_supported() {
+  case "${1:-}" in
+    443|2053|2083|2087|2096|8443) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+flag_enabled() {
+  case "${1:-0}" in
+    1|yes|YES|true|TRUE|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reality_port_is_standard() {
+  [[ "${1:-}" == "443" ]]
+}
+
+enforce_reality_port_policy() {
+  [[ "${DEPLOY_MODE:-reality}" == "reality" ]] || return 0
+  reality_port_is_standard "$PORT" && return 0
+  warn "REALITY is expected to listen on TCP/443 so its destination port matches normal HTTPS traffic."
+  warn "Selected non-standard REALITY port: ${PORT}"
+  if flag_enabled "$ALLOW_NONSTANDARD_REALITY_PORT"; then
+    warn "Explicit non-standard REALITY port override accepted."
+    return 0
+  fi
+  if [[ "${NONINTERACTIVE:-0}" == "1" || ! -t 0 ]]; then
+    fatal "Non-standard REALITY ports require --allow-nonstandard-reality-port."
+  fi
+  confirm_yes_default_no "Continue with REALITY on non-standard port ${PORT}?" \
+    || fatal "Cancelled. Use TCP/443 for REALITY or choose XHTTP-TLS for supported CDN HTTPS ports."
+  ALLOW_NONSTANDARD_REALITY_PORT=1
 }
 
 validate_tls_cert_mode() {
@@ -162,43 +247,15 @@ normalize_tls_cert_mode() {
   esac
 }
 
-domain_matches_certificate_name() {
-  local domain="$1" cert_name="$2" suffix left
-  domain="${domain,,}"
-  cert_name="${cert_name,,}"
-  cert_name="${cert_name%.}"
-  domain="${domain%.}"
-
-  if [[ "$cert_name" == \*.* ]]; then
-    suffix="${cert_name#\*.}"
-    [[ "$domain" == *".${suffix}" ]] || return 1
-    left="${domain%".${suffix}"}"
-    [[ -n "$left" && "$left" != *.* ]]
-    return $?
-  fi
-
-  [[ "$domain" == "$cert_name" ]]
-}
-
 cert_covers_domain() {
-  local cert_file="$1" domain="$2" san_line name subject cn
-  san_line="$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null || true)"
-  while IFS= read -r name; do
-    name="${name#DNS:}"
-    name="${name#"${name%%[![:space:]]*}"}"
-    name="${name%"${name##*[![:space:]]}"}"
-    [[ -n "$name" ]] || continue
-    domain_matches_certificate_name "$domain" "$name" && return 0
-  done < <(printf '%s\n' "$san_line" | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:/DNS:/p')
-
-  subject="$(openssl x509 -in "$cert_file" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
-  cn="$(printf '%s\n' "$subject" | sed -n 's/.*CN=\([^,]*\).*/\1/p' | head -n1)"
-  [[ -n "$cn" ]] && domain_matches_certificate_name "$domain" "$cn"
+  local cert_file="$1" domain="$2"
+  openssl x509 -in "$cert_file" -noout -checkhost "$domain" >/dev/null 2>&1
 }
 
 check_tls_cert_files() {
-  local cert_pub key_pub
+  local domain="${1:-${SNI:-}}" cert_pub key_pub
   command -v openssl >/dev/null 2>&1 || { warn "openssl is required to validate TLS certificate files."; return 1; }
+  [[ -n "$domain" ]] || { warn "TLS certificate validation requires a non-empty SNI domain."; return 1; }
   [[ -r "$TLS_CERT_FILE" ]] || { warn "TLS certificate file not readable: $TLS_CERT_FILE"; return 1; }
   [[ -r "$TLS_KEY_FILE" ]] || { warn "TLS private key file not readable: $TLS_KEY_FILE"; return 1; }
   openssl x509 -in "$TLS_CERT_FILE" -noout >/dev/null 2>&1 || { warn "Invalid TLS certificate file: $TLS_CERT_FILE"; return 1; }
@@ -208,15 +265,26 @@ check_tls_cert_files() {
   cert_pub="$(openssl x509 -in "$TLS_CERT_FILE" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
   key_pub="$(openssl pkey -in "$TLS_KEY_FILE" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')"
   [[ -n "$cert_pub" && -n "$key_pub" && "$cert_pub" == "$key_pub" ]] || { warn "TLS private key does not match certificate"; return 1; }
-  cert_covers_domain "$TLS_CERT_FILE" "$SNI" || { warn "TLS certificate does not cover SNI domain: $SNI"; return 1; }
+  cert_covers_domain "$TLS_CERT_FILE" "$domain" || { warn "TLS certificate does not cover SNI domain: $domain"; return 1; }
+  if [[ "${TLS_CERT_MODE:-public}" == "public" ]]; then
+    openssl verify -purpose sslserver -verify_hostname "$domain" -untrusted "$TLS_CERT_FILE" "$TLS_CERT_FILE" >/dev/null 2>&1 \
+      || { warn "Public TLS certificate chain is not trusted or incomplete: $TLS_CERT_FILE"; return 1; }
+  fi
 }
 
 validate_tls_cert_files() {
-  check_tls_cert_files || fatal "TLS certificate validation failed"
+  check_tls_cert_files "$SNI" || fatal "TLS certificate validation failed"
+  check_tls_files_service_readable || fatal "Xray service cannot read the configured TLS certificate/key"
 }
 
 warn_cloudflare_origin_ca_scope() {
   warn "Cloudflare Origin CA requires Cloudflare proxy with Full(strict); direct clients and browsers will not trust this certificate."
+  warn "Restrict origin access to Cloudflare IP ranges; do not expose this certificate endpoint directly to the Internet."
+}
+
+warn_reality_target_scope() {
+  warn "REALITY forwards authentication failures to its target. Prefer a stable TLS 1.3 site in the same ASN that you trust/control."
+  warn "Avoid generic CDN targets whose upstream can be selected or abused as an open forwarding destination."
 }
 
 clear_screen() {
@@ -280,13 +348,55 @@ redact_sensitive_text() {
   sed -E \
     -e 's/^([[:space:]]*(PrivateKey|Private key|Private)[^:]*:[[:space:]]*).*/\1<redacted>/I' \
     -e 's/^([[:space:]]*(Seed)[^:]*:[[:space:]]*).*/\1<redacted>/I' \
-    -e 's/("decryption"[[:space:]]*:[[:space:]]*")[^"]+"/\1<redacted>"/I'
+    -e 's/("(decryption|encryption|privateKey|mldsa65Seed)"[[:space:]]*:[[:space:]]*")[^"]+"/\1<redacted>"/I'
 }
 
 service_unit_exists() {
   local svc="$1"
   systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service" \
     || systemctl list-units --all --type=service 2>/dev/null | awk '{print $1}' | grep -qx "${svc}.service"
+}
+
+xray_service_user() {
+  local user=""
+  command -v systemctl >/dev/null 2>&1 || { printf '%s\n' root; return 0; }
+  user="$(systemctl show "${SERVICE_NAME:-xray}" -p User --value 2>/dev/null || true)"
+  printf '%s\n' "${user:-root}"
+}
+
+service_user_can_read() {
+  local user="$1" path="$2"
+  if [[ "$user" == "root" ]]; then
+    [[ -r "$path" ]]
+  elif [[ "$(id -u)" == "0" ]] && command -v runuser >/dev/null 2>&1; then
+    runuser -u "$user" -- test -r "$path"
+  elif [[ "$(id -un 2>/dev/null || true)" == "$user" ]]; then
+    [[ -r "$path" ]]
+  else
+    return 2
+  fi
+}
+
+check_tls_files_service_readable() {
+  local user rc=0 path
+  command -v systemctl >/dev/null 2>&1 || return 0
+  service_unit_exists "${SERVICE_NAME:-xray}" || return 0
+  user="$(xray_service_user)"
+  for path in "$TLS_CERT_FILE" "$TLS_KEY_FILE"; do
+    if service_user_can_read "$user" "$path"; then
+      continue
+    else
+      rc=$?
+    fi
+    if [[ "$rc" -eq 2 ]]; then
+      warn "Cannot verify TLS file access as service user ${user} without root privileges: $path"
+      continue
+    fi
+    warn "Xray service user ${user} cannot read: $path"
+    warn "Grant only that service account/group read and parent-directory traverse access; do not make the private key world-readable."
+    return 1
+  done
+  ok "TLS certificate and key are readable by Xray service user: ${user}"
 }
 
 print_service_diagnostics() {
@@ -343,11 +453,23 @@ fatal_with_rollback() {
   local ans=""
   if [[ -n "${BACKUP_FILE:-}" && -f "$BACKUP_FILE" ]]; then
     warn "$msg"
-    read -r -p "是否恢复本次备份配置？[y/N]: " ans
-    case "${ans:-N}" in
-      y|Y|yes|YES) restore_backup || warn "恢复备份失败，请手动检查：$BACKUP_FILE" ;;
+    if [[ "${NONINTERACTIVE:-0}" == "1" || ! -t 0 ]]; then
+      warn "Non-interactive failure; restoring the previous configuration automatically."
+      restore_backup || warn "恢复备份失败，请手动检查：$BACKUP_FILE"
+      fatal "$msg"
+    fi
+    read -r -p "是否恢复本次备份配置？[Y/n]: " ans || ans="Y"
+    case "${ans:-Y}" in
+      y|Y|yes|YES|"") restore_backup || warn "恢复备份失败，请手动检查：$BACKUP_FILE" ;;
       *) warn "已保留当前新配置。备份位置：$BACKUP_FILE" ;;
     esac
+  elif [[ "${CONFIG_WRITTEN_THIS_RUN:-0}" == "1" && -f "${CONFIG_PATH:-}" ]]; then
+    warn "$msg"
+    warn "Fresh deployment failed; removing the new configuration and stopping ${SERVICE_NAME:-xray}.service."
+    rm -f -- "$CONFIG_PATH" || warn "Failed to remove new configuration: $CONFIG_PATH"
+    if service_unit_exists "${SERVICE_NAME:-xray}"; then
+      systemctl stop "${SERVICE_NAME:-xray}" >/dev/null 2>&1 || warn "Failed to stop ${SERVICE_NAME:-xray}.service"
+    fi
   fi
   fatal "$msg"
 }
@@ -514,6 +636,22 @@ ip_in_range() {
   ((ip_num >= start_num && ip_num <= end_num))
 }
 
+ipv6_is_non_global() {
+  local lower first first_value
+  lower="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+  case "$lower" in
+    ::|::1|2001:db8:*|2001:0db8:*) return 0 ;;
+  esac
+
+  first="${lower%%:*}"
+  [[ "$first" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+  first_value=$((16#$first))
+  ((first_value >= 16#fc00 && first_value <= 16#fdff)) && return 0
+  ((first_value >= 16#fe80 && first_value <= 16#febf)) && return 0
+  ((first_value >= 16#ff00 && first_value <= 16#ffff)) && return 0
+  return 1
+}
+
 is_private_or_local_ip() {
   local ip="$1" ip_num
   ip="${ip#[}"
@@ -537,12 +675,7 @@ is_private_or_local_ip() {
     return 1
   fi
 
-  local lower
-  lower="$(printf '%s' "$ip" | tr 'A-F' 'a-f')"
-  case "$lower" in
-    ::1|::|fe80:*|fc*|fd*|2001:db8:*|2001:db8::*|ff*) return 0 ;;
-  esac
-  return 1
+  ipv6_is_non_global "$ip"
 }
 
 sanitize_sni() {
@@ -597,6 +730,7 @@ probe_sni_domain() {
   local host="$1" timeout="${SNI_CHECK_TIMEOUT:-8}"
   local out http_code http_version remote_ip time_connect time_appconnect redirect_url
   local tls_out tls_rc=0 tls_ok=0 h2_ok=0 timeout_cmd=() xray_ping_rc=0
+  LAST_SNI_REMOTE_IP=""
 
   if ! sni_check_enabled; then
     warn "SNI reachability check skipped."
@@ -678,6 +812,7 @@ probe_sni_domain() {
   http_code="$(metric_value "$out" "http_code")"
   http_version="$(metric_value "$out" "http_version")"
   remote_ip="$(metric_value "$out" "remote_ip")"
+  LAST_SNI_REMOTE_IP="$remote_ip"
   time_connect="$(metric_value "$out" "time_connect")"
   time_appconnect="$(metric_value "$out" "time_appconnect")"
   redirect_url="$(metric_value "$out" "redirect_url")"
@@ -799,8 +934,93 @@ get_public_ip() {
   echo "$ip"
 }
 
+parse_asn_response() {
+  jq -er '
+    select((.asn // "") != "")
+    | ((.asn | tostring) + "|" + (.asn_organization // .organization // .isp // "unknown"))
+  ' <<< "$1" 2>/dev/null
+}
+
+lookup_ip_asn() {
+  local ip="$1" response
+  [[ -n "$ip" ]] || return 1
+  if response="$(curl -fsS --connect-timeout 4 --max-time 8 "https://api.ip.sb/geoip/${ip}" 2>/dev/null)" \
+    && parse_asn_response "$response"; then
+    return 0
+  fi
+  lookup_ipv4_asn_cymru "$ip"
+}
+
+lookup_ipv4_asn_cymru() {
+  local ip="$1" a b c d query response data asn org_response org_data org
+  ip_to_int "$ip" >/dev/null 2>&1 || return 1
+  IFS=. read -r a b c d <<< "$ip"
+  query="${d}.${c}.${b}.${a}.origin.asn.cymru.com"
+  response="$(curl -fsS --connect-timeout 4 --max-time 8 -G \
+    --data-urlencode "name=${query}" --data-urlencode "type=TXT" \
+    https://dns.google/resolve 2>/dev/null)" || return 1
+  data="$(jq -er '.Answer[]? | select(.type == 16) | .data' <<< "$response" 2>/dev/null | head -n1)" || return 1
+  asn="$(awk -F'|' '{ gsub(/[[:space:]]/, "", $1); print $1 }' <<< "$data")"
+  [[ "$asn" =~ ^[0-9]+$ ]] || return 1
+
+  org_response="$(curl -fsS --connect-timeout 4 --max-time 8 -G \
+    --data-urlencode "name=AS${asn}.asn.cymru.com" --data-urlencode "type=TXT" \
+    https://dns.google/resolve 2>/dev/null || true)"
+  org_data="$(jq -r '.Answer[]? | select(.type == 16) | .data' <<< "$org_response" 2>/dev/null | head -n1)"
+  org="$(awk -F'|' '{ value=$NF; gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value }' <<< "$org_data")"
+  printf '%s|%s\n' "$asn" "${org:-unknown}"
+}
+
+resolve_domain_public_ip() {
+  local host="$1" ip=""
+  if command -v getent >/dev/null 2>&1; then
+    ip="$(getent ahostsv4 "$host" 2>/dev/null | awk '$2 == "STREAM" { print $1; exit }')"
+    [[ -n "$ip" ]] || ip="$(getent ahosts "$host" 2>/dev/null | awk '$2 == "STREAM" { print $1; exit }')"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(curl -sS --connect-timeout 4 --max-time 8 -o /dev/null -w '%{remote_ip}' "https://${host}/" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$ip"
+}
+
+asn_check_enabled() {
+  flag_enabled "${ASN_CHECK:-1}"
+}
+
+check_reality_target_asn() {
+  local host="$1" vps_ip target_ip vps_record target_record vps_asn target_asn
+  local vps_org target_org
+  asn_check_enabled || { warn "REALITY same-ASN check skipped."; return 2; }
+
+  vps_ip="$(get_public_ip)"
+  target_ip="${LAST_SNI_REMOTE_IP:-}"
+  [[ -n "$target_ip" ]] || target_ip="$(resolve_domain_public_ip "$host")"
+  if [[ -z "$vps_ip" || -z "$target_ip" ]]; then
+    warn "Unable to determine VPS or REALITY target IP; same-ASN check is advisory and was skipped."
+    return 2
+  fi
+  if is_private_or_local_ip "$vps_ip" || is_private_or_local_ip "$target_ip"; then
+    warn "Same-ASN check requires public IP addresses: VPS=${vps_ip}, target=${target_ip}"
+    return 2
+  fi
+
+  vps_record="$(lookup_ip_asn "$vps_ip")" || { warn "Unable to query ASN for VPS IP ${vps_ip}; continuing without ASN enforcement."; return 2; }
+  target_record="$(lookup_ip_asn "$target_ip")" || { warn "Unable to query ASN for target IP ${target_ip}; continuing without ASN enforcement."; return 2; }
+  IFS='|' read -r vps_asn vps_org <<< "$vps_record"
+  IFS='|' read -r target_asn target_org <<< "$target_record"
+
+  info "VPS ASN: AS${vps_asn} ${vps_org} (${vps_ip})"
+  info "Target ASN: AS${target_asn} ${target_org} (${target_ip})"
+  if [[ "$vps_asn" == "$target_asn" ]]; then
+    ok "REALITY target is in the same ASN as this VPS."
+    return 0
+  fi
+  warn "REALITY target is not in the same ASN as this VPS. This is advisory, but it is not the preferred XTLS target selection."
+  return 1
+}
+
 listener_protocol() {
-  if [[ "${DEPLOY_MODE:-reality}" == "cdn-xhttp-tls" ]] && [[ "$(normalize_xhttp_alpn_choice "${XHTTP_ALPN_CHOICE:-stable}" 2>/dev/null || true)" == "h3" ]]; then
+  if [[ "${DEPLOY_MODE:-reality}" == "cdn-xhttp-tls" ]] && [[ "$(normalize_xhttp_transport_profile "${XHTTP_TRANSPORT_PROFILE:-cdn-stable}" 2>/dev/null || true)" == "direct-h3" ]]; then
     printf '%s\n' "udp"
   else
     printf '%s\n' "tcp"
@@ -920,24 +1140,84 @@ install_xray_official() {
   download_and_run_installer "https://github.com/XTLS/Xray-install/raw/main/install-release.sh" bash "Xray" install \
     || fatal "Xray 官方安装脚本执行失败"
   command -v xray >/dev/null 2>&1 || fatal "Xray 安装后仍未找到 xray 命令"
-  systemctl enable xray >/dev/null 2>&1 || true
+  systemctl enable xray >/dev/null 2>&1 || fatal "Xray service enable failed"
+}
+
+xray_required_capabilities() {
+  # vlessenc is the modern-core baseline for this script, even when the user selects none.
+  printf '%s\n' run uuid vlessenc
+  if [[ "${DEPLOY_MODE:-reality}" == "reality" ]]; then
+    printf '%s\n' x25519 tls
+    flag_enabled "${ENABLE_MLDSA:-0}" && printf '%s\n' mldsa65
+  fi
+}
+
+missing_xray_capabilities() {
+  local help_text="$1" capability
+  shift
+  for capability in "$@"; do
+    printf '%s\n' "$help_text" | awk -v wanted="$capability" '$1 == wanted { found = 1 } END { exit !found }' \
+      || printf '%s\n' "$capability"
+  done
+}
+
+xray_missing_required_capabilities() {
+  local help_text tls_help missing
+  local -a required=()
+  help_text="$($BIN help 2>&1 || true)"
+  mapfile -t required < <(xray_required_capabilities)
+  missing="$(missing_xray_capabilities "$help_text" "${required[@]}")"
+  [[ -n "$missing" ]] && printf '%s\n' "$missing"
+  if [[ "${DEPLOY_MODE:-reality}" == "reality" ]]; then
+    tls_help="$($BIN tls 2>&1 || true)"
+    printf '%s\n' "$tls_help" | awk '$1 == "ping" { found = 1 } END { exit !found }' \
+      || printf '%s\n' tls-ping
+  fi
+}
+
+ensure_xray_capabilities() {
+  local missing
+  missing="$(xray_missing_required_capabilities)"
+  if [[ -z "$missing" ]]; then
+    ok "Xray supports the commands required by the selected deployment profile."
+    return 0
+  fi
+
+  warn "Installed Xray is missing required capabilities: $(printf '%s' "$missing" | paste -sd, -)"
+  if [[ "${NONINTERACTIVE:-0}" == "1" ]] && ! is_auto_yes; then
+    fatal "Rerun with --update-xray (or --yes) to upgrade through the official XTLS installer."
+  fi
+  confirm_yes_default_yes "是否使用 XTLS 官方安装脚本升级 Xray-core？" \
+    && install_xray_official \
+    || fatal "Xray capability upgrade was cancelled."
+  BIN="$(command -v xray)"
+  missing="$(xray_missing_required_capabilities)"
+  [[ -z "$missing" ]] || fatal "Xray still lacks required capabilities after upgrade: $(printf '%s' "$missing" | paste -sd, -)"
+  ok "Xray capability check passed after official upgrade."
 }
 
 ensure_xray_installed() {
+  local was_installed=1
   if ! command -v xray >/dev/null 2>&1; then
+    was_installed=0
     warn "未找到 xray。"
     confirm_yes_default_yes "是否使用 XTLS 官方脚本安装 Xray-core？" \
       && install_xray_official \
       || fatal "已取消安装，退出。"
+  elif flag_enabled "$UPDATE_XRAY"; then
+    install_xray_official
   fi
   BIN="$(command -v xray)"
   SERVICE_NAME="xray"
   CONFIG_DIR="/usr/local/etc/xray"
   CONFIG_PATH="$CONFIG_DIR/config.json"
+  if [[ "$was_installed" == "1" ]]; then
+    info "Installed Xray: $($BIN version 2>/dev/null | head -n1 || printf 'unknown version')"
+  fi
 }
 
 preflight_check() {
-  local failures=0 port sni host owners mode proto
+  local failures=0 port sni host owners mode proto route_strategy missing
   port="${CLI_PORT:-$DEFAULT_PORT}"
   sni="$(sanitize_sni "${CLI_SNI:-$DEFAULT_SNI}")"
   host="${CLI_SERVER:-}"
@@ -955,6 +1235,15 @@ preflight_check() {
     warn "Invalid port: $port"
     failures=$((failures + 1))
   fi
+  if [[ "$DEPLOY_MODE" == "reality" ]] && ! reality_port_is_standard "$port"; then
+    warn "REALITY is expected to listen on TCP/443; selected port is ${port}."
+    if flag_enabled "$ALLOW_NONSTANDARD_REALITY_PORT"; then
+      warn "Explicit non-standard REALITY port override is set."
+    else
+      warn "Add --allow-nonstandard-reality-port only if this is intentional."
+      failures=$((failures + 1))
+    fi
+  fi
 
   if validate_domain_name "$sni"; then
     ok "SNI/domain looks valid: $sni"
@@ -963,6 +1252,8 @@ preflight_check() {
         warn "SNI reachability check failed: $sni"
         failures=$((failures + 1))
       fi
+      check_reality_target_asn "$sni" || true
+      warn_reality_target_scope
     else
       info "CDN XHTTP TLS mode uses this value as the certificate/SNI domain; REALITY target probing is skipped."
     fi
@@ -978,20 +1269,28 @@ preflight_check() {
     if [[ -n "$XHTTP_PATH" ]]; then
       validate_xhttp_path "$XHTTP_PATH" || { warn "Invalid XHTTP path: $XHTTP_PATH"; failures=$((failures + 1)); }
     fi
-    if XHTTP_ALPN_JSON="$(xhttp_alpn_profile_json "$XHTTP_ALPN_CHOICE")"; then
-      XHTTP_ALPN_CHOICE="$(normalize_xhttp_alpn_choice "$XHTTP_ALPN_CHOICE")"
-      ok "XHTTP ALPN profile looks valid: $XHTTP_ALPN_CHOICE => $XHTTP_ALPN_JSON"
-      info "STABLE keeps the XHTTP server on TCP H1/H2; clients/CDNs may still use H3 before converting to H1/H2 origin traffic."
-      if [[ "$XHTTP_ALPN_CHOICE" == "h3" ]]; then
-        warn "Direct H3 makes Xray listen on UDP/443. Prefer real Nginx/Caddy/CDN fronting for H3 to reduce fingerprint risk."
+    if XHTTP_TRANSPORT_PROFILE="$(normalize_xhttp_transport_profile "$XHTTP_TRANSPORT_PROFILE")"; then
+      XHTTP_ORIGIN_ALPN_JSON="$(xhttp_origin_alpn_json "$XHTTP_TRANSPORT_PROFILE")"
+      XHTTP_CLIENT_ALPN_JSON="$(xhttp_client_alpn_json "$XHTTP_TRANSPORT_PROFILE")"
+      ok "XHTTP transport profile looks valid: $XHTTP_TRANSPORT_PROFILE; origin=$XHTTP_ORIGIN_ALPN_JSON client=$XHTTP_CLIENT_ALPN_JSON"
+      if [[ "$XHTTP_TRANSPORT_PROFILE" == "cdn-h3" ]]; then
+        info "CDN-H3 keeps the Xray origin on TCP H1/H2; only the client-to-CDN edge uses H3."
+      elif [[ "$XHTTP_TRANSPORT_PROFILE" == "direct-h3" ]]; then
+        warn "DIRECT-H3 makes Xray listen on UDP/${port}; use it only for controlled diagnostics, not as the CDN default."
       fi
     else
-      warn "Invalid XHTTP ALPN profile: $XHTTP_ALPN_CHOICE"
+      warn "Invalid XHTTP transport profile: $XHTTP_TRANSPORT_PROFILE"
       failures=$((failures + 1))
     fi
     if TLS_CERT_MODE="$(normalize_tls_cert_mode "$TLS_CERT_MODE")"; then
       ok "TLS cert mode looks valid: $TLS_CERT_MODE"
-      [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]] && warn_cloudflare_origin_ca_scope
+      if [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]]; then
+        warn_cloudflare_origin_ca_scope
+        if ! cloudflare_https_port_supported "$port"; then
+          warn "Cloudflare does not proxy HTTPS on port ${port}. Supported HTTPS ports: 443, 2053, 2083, 2087, 2096, 8443."
+          failures=$((failures + 1))
+        fi
+      fi
     else
       warn "Invalid TLS cert mode: $TLS_CERT_MODE"
       failures=$((failures + 1))
@@ -1000,8 +1299,17 @@ preflight_check() {
       warn "CDN XHTTP TLS mode requires --tls-cert-file and --tls-key-file."
       failures=$((failures + 1))
     else
-      check_tls_cert_files || failures=$((failures + 1))
+      check_tls_cert_files "$sni" || failures=$((failures + 1))
     fi
+  fi
+
+  if ROUTE_PROFILE="$(normalize_route_profile "$ROUTE_PROFILE")"; then
+    route_strategy="$(routing_domain_strategy "$ROUTE_PROFILE")"
+    ok "Routing profile looks valid: $ROUTE_PROFILE => $route_strategy"
+    [[ "$ROUTE_PROFILE" == "strict" ]] && warn "STRICT resolves unmatched domains so CN/private IP rules can match; GeoDNS differences may affect global services."
+  else
+    warn "Invalid routing profile: $ROUTE_PROFILE"
+    failures=$((failures + 1))
   fi
 
   if [[ -n "$host" ]]; then
@@ -1038,10 +1346,19 @@ preflight_check() {
     CONFIG_PATH="$CONFIG_DIR/config.json"
     ok "Xray found: $BIN"
     "$BIN" version 2>/dev/null | head -n1 || true
-    "$BIN" x25519 >/dev/null 2>&1 || { warn "xray x25519 is unavailable"; failures=$((failures + 1)); }
-    "$BIN" vlessenc >/dev/null 2>&1 || { warn "xray vlessenc is unavailable; upgrade Xray-core before using VLESS Encryption"; failures=$((failures + 1)); }
+    missing="$(xray_missing_required_capabilities)"
+    if [[ -n "$missing" ]]; then
+      warn "Xray is missing capabilities required by this profile: $(printf '%s' "$missing" | paste -sd, -)"
+      warn "Deployment can upgrade it with --update-xray."
+      failures=$((failures + 1))
+    else
+      ok "Xray capability check passed for the selected profile."
+    fi
     if service_unit_exists "$SERVICE_NAME"; then
       ok "systemd unit found: ${SERVICE_NAME}.service"
+      if [[ "$DEPLOY_MODE" == "cdn-xhttp-tls" && -n "$TLS_CERT_FILE" && -n "$TLS_KEY_FILE" ]]; then
+        check_tls_files_service_readable || failures=$((failures + 1))
+      fi
     else
       warn "systemd unit not found: ${SERVICE_NAME}.service"
     fi
@@ -1066,13 +1383,14 @@ preflight_check() {
 }
 
 read_common_inputs() {
-  local auto_detected_server=0 mode_input default_xhttp_path mode_default cert_mode_input cert_mode_default sni_prompt alpn_input alpn_default
+  local auto_detected_server=0 mode_input default_xhttp_path mode_default cert_mode_input cert_mode_default
+  local sni_prompt transport_input transport_default route_input route_default
   clear_screen
   case "$(normalize_deploy_mode "$DEPLOY_MODE" 2>/dev/null || printf '%s\n' reality)" in
     cdn-xhttp-tls) mode_default="2" ;;
     *) mode_default="1" ;;
   esac
-  mode_input="$(input_default "Deployment profile: 1=REALITY-VISION (direct), 2=XHTTP-TLS (CDN)" "$mode_default")"
+  mode_input="$(input_default "Deployment profile: 1=REALITY-VISION (direct), 2=XHTTP-TLS-VISION (CDN)" "$mode_default")"
   DEPLOY_MODE="$(normalize_deploy_mode "$mode_input")" || fatal "Invalid deploy mode: $mode_input"
   ok "VLESS/Xray automated deployment ${SCRIPT_VERSION}"
   info "当前核心：Xray-core (${BIN})"
@@ -1083,6 +1401,7 @@ read_common_inputs() {
     [[ "${NONINTERACTIVE:-0}" == "1" ]] && fatal "端口无效：$PORT"
     warn "端口无效，请输入 1-65535。"
   done
+  enforce_reality_port_policy
 
   if [[ "$DEPLOY_MODE" == "cdn-xhttp-tls" ]]; then
     sni_prompt="TLS/SNI domain"
@@ -1099,10 +1418,23 @@ read_common_inputs() {
     confirm_yes_default_no "SNI reachability check failed. Continue anyway?" \
       || fatal "已取消。请更换 SNI，或确认目标站 HTTPS/TLS 可用后重试。"
   fi
+  if [[ "$DEPLOY_MODE" == "reality" ]]; then
+    check_reality_target_asn "$SNI" || true
+  fi
+  [[ "$DEPLOY_MODE" == "reality" ]] && warn_reality_target_scope
   NODE_NAME="$(input_default "节点名称" "${CLI_NODE_NAME:-$DEFAULT_NODE_NAME}")"
 
-  BLOCK_CN="true"
-  info "CN/private 阻断路由：已默认启用。"
+  case "$(normalize_route_profile "$ROUTE_PROFILE" 2>/dev/null || printf '%s\n' compatible)" in
+    strict) route_default="2" ;;
+    *) route_default="1" ;;
+  esac
+  route_input="$(input_default "Routing profile: 1=COMPATIBLE (AsIs), 2=STRICT CN/IP (IPIfNonMatch)" "$route_default")"
+  ROUTE_PROFILE="$(normalize_route_profile "$route_input")" || fatal "Invalid routing profile: $route_input"
+  if [[ "$ROUTE_PROFILE" == "strict" ]]; then
+    warn "STRICT resolves unmatched domains before IP rules; this strengthens CN/private IP blocking but GeoDNS may affect global services."
+  else
+    info "COMPATIBLE blocks CN domains and IP-form CN/private destinations without extra server-side DNS resolution."
+  fi
 
   SERVER_IP="${CLI_SERVER:-}"
   if [[ -z "$SERVER_IP" && "$DEPLOY_MODE" == "cdn-xhttp-tls" ]]; then
@@ -1137,22 +1469,35 @@ read_common_inputs() {
     TLS_CERT_MODE="$(normalize_tls_cert_mode "$cert_mode_input")" || fatal "Invalid TLS cert mode: $cert_mode_input"
     if [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]]; then
       warn_cloudflare_origin_ca_scope
+      cloudflare_https_port_supported "$PORT" \
+        || fatal "Cloudflare does not proxy HTTPS on port ${PORT}. Use 443, 2053, 2083, 2087, 2096, or 8443."
     fi
 
     TLS_CERT_FILE="$(input_default "TLS certificate file path" "$TLS_CERT_FILE")"
     TLS_KEY_FILE="$(input_default "TLS private key file path" "$TLS_KEY_FILE")"
     validate_tls_cert_files
 
-    case "$(normalize_xhttp_alpn_choice "$XHTTP_ALPN_CHOICE" 2>/dev/null || printf '%s\n' stable)" in
-      h2) alpn_default="2" ;;
-      h3) alpn_default="3" ;;
-      *) alpn_default="1" ;;
+    case "$(normalize_xhttp_transport_profile "$XHTTP_TRANSPORT_PROFILE" 2>/dev/null || printf '%s\n' cdn-stable)" in
+      cdn-h2) transport_default="2" ;;
+      cdn-h3) transport_default="3" ;;
+      direct-h3)
+        if [[ "${NONINTERACTIVE:-0}" == "1" ]]; then
+          transport_default="direct-h3"
+        else
+          warn "DIRECT-H3 is available only through --xhttp-profile direct-h3 for controlled diagnostics."
+          transport_default="1"
+        fi
+        ;;
+      *) transport_default="1" ;;
     esac
-    alpn_input="$(input_default "ALPN profile: 1=STABLE (H2+HTTP/1.1), 2=H2 ONLY, 3=H3 ONLY (UDP/443)" "$alpn_default")"
-    XHTTP_ALPN_CHOICE="$(normalize_xhttp_alpn_choice "$alpn_input")" || fatal "Invalid XHTTP ALPN profile: $alpn_input"
-    XHTTP_ALPN_JSON="$(xhttp_alpn_profile_json "$XHTTP_ALPN_CHOICE")" || fatal "Invalid XHTTP ALPN profile: $XHTTP_ALPN_CHOICE"
-    if [[ "$XHTTP_ALPN_CHOICE" == "h3" ]]; then
-      warn "Direct H3 makes Xray listen on UDP/443. Prefer real Nginx/Caddy/CDN fronting for H3 to reduce fingerprint risk."
+    transport_input="$(input_default "Transport profile: 1=CDN-STABLE, 2=CDN-H2, 3=CDN-H3" "$transport_default")"
+    XHTTP_TRANSPORT_PROFILE="$(normalize_xhttp_transport_profile "$transport_input")" || fatal "Invalid XHTTP transport profile: $transport_input"
+    XHTTP_ORIGIN_ALPN_JSON="$(xhttp_origin_alpn_json "$XHTTP_TRANSPORT_PROFILE")"
+    XHTTP_CLIENT_ALPN_JSON="$(xhttp_client_alpn_json "$XHTTP_TRANSPORT_PROFILE")"
+    if [[ "$XHTTP_TRANSPORT_PROFILE" == "cdn-h3" ]]; then
+      info "CDN-H3 keeps the Xray origin on TCP H1/H2; the client requests H3 only at the CDN edge."
+    elif [[ "$XHTTP_TRANSPORT_PROFILE" == "direct-h3" ]]; then
+      warn "DIRECT-H3 makes Xray listen on UDP/${PORT}; use it only for direct controlled testing."
     fi
   fi
 }
@@ -1251,6 +1596,51 @@ gen_xray_vless_encryption() {
   ok "Xray VLESS Encryption：${alg} auth"
 }
 
+tls_ping_sni_chain_length() {
+  printf '%s\n' "$1" | awk '
+    /Pinging with SNI/ { in_sni = 1; next }
+    in_sni && /Certificate chain.s total length:/ {
+      line = $0
+      sub(/.*length:[[:space:]]*/, "", line)
+      sub(/[[:space:]].*/, "", line)
+      print line
+      exit
+    }
+  '
+}
+
+tls_ping_sni_has_pq_kex() {
+  printf '%s\n' "$1" | awk '
+    /Pinging with SNI/ { in_sni = 1; next }
+    in_sni && /TLS Post-Quantum key exchange:/ {
+      found = 1
+      if (tolower($0) ~ /true/) exit 0
+      exit 1
+    }
+    END { if (!found) exit 1 }
+  '
+}
+
+validate_mldsa_target() {
+  local out chain_length
+  info "Validating REALITY target certificate size for ML-DSA-65: $SNI"
+  if ! out="$($BIN tls ping "$SNI" 2>&1)"; then
+    printf '%s\n' "$out" | sed -n '1,16p' | sed 's/^/  /'
+    fatal "Cannot validate the REALITY target for ML-DSA-65. Disable ML-DSA or choose a reachable target."
+  fi
+  chain_length="$(tls_ping_sni_chain_length "$out")"
+  [[ "$chain_length" =~ ^[0-9]+$ ]] || fatal "xray tls ping did not report the target certificate-chain length; ML-DSA was not enabled."
+  if ((chain_length <= 3500)); then
+    fatal "REALITY target certificate chain is ${chain_length} bytes; ML-DSA requires more than 3500 bytes to avoid a size fingerprint."
+  fi
+  ok "REALITY target certificate chain is suitable for ML-DSA: ${chain_length} bytes"
+  if tls_ping_sni_has_pq_kex "$out"; then
+    ok "REALITY target supports post-quantum X25519MLKEM768 key exchange."
+  else
+    warn "Target key exchange is not post-quantum. ML-DSA protects the REALITY signature, but the transport key exchange remains X25519."
+  fi
+}
+
 gen_xray_mldsa_optional() {
   echo
   echo "REALITY ML-DSA-65 额外签名："
@@ -1263,6 +1653,7 @@ gen_xray_mldsa_optional() {
   esac
 
   local out
+  validate_mldsa_target
   out="$($BIN mldsa65 2>&1)" || { printf '%s\n' "$out" | redact_sensitive_text; fatal "xray mldsa65 执行失败。当前 Xray 可能过旧，请升级。"; }
 
   MLDSA_SEED="$(field_after_colon "$out" "Seed")"
@@ -1292,7 +1683,10 @@ backup_existing_config() {
   BACKUP_FILE=""
   if [[ -f "$CONFIG_PATH" ]]; then
     BACKUP_FILE="${CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
-    cp -a "$CONFIG_PATH" "$BACKUP_FILE"
+    if ! cp -a "$CONFIG_PATH" "$BACKUP_FILE"; then
+      BACKUP_FILE=""
+      fatal "Failed to back up existing Xray configuration; no changes were written."
+    fi
     warn "已备份旧配置：$BACKUP_FILE"
 
     # 只保留最新 5 个备份，避免长期堆积。
@@ -1305,8 +1699,16 @@ backup_existing_config() {
   fi
 }
 
+install_generated_config_atomically() {
+  local tmp="$1"
+  chmod 600 "$tmp" || return 1
+  chown root:root "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$CONFIG_PATH" || return 1
+  CONFIG_WRITTEN_THIS_RUN=1
+}
+
 validate_generated_config() {
-  local config_file="$1" test_log
+  local config_file="$1" test_log warnings
   info "检查配置文件：$config_file"
   jq empty "$config_file" || return 1
 
@@ -1319,18 +1721,24 @@ validate_generated_config() {
       return 1
     fi
   fi
+  warnings="$(grep -Ei '(^|[^A-Za-z])(warn|warning)([^A-Za-z]|$)' "$test_log" || true)"
+  if [[ -n "$warnings" ]]; then
+    warn "Xray accepted the config with warning(s):"
+    printf '%s\n' "$warnings" | redact_sensitive_text | sed 's/^/  /'
+  fi
   rm -f "$test_log"
 }
 
 write_xray_config_xhttp_tls() {
-  local tmp rules_json='[
+  local tmp domain_strategy rules_json='[
     {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
     {"type":"field","protocol":["bittorrent"],"outboundTag":"block"},
     {"type":"field","domain":["geosite:cn"],"outboundTag":"block"},
     {"type":"field","ip":["geoip:cn"],"outboundTag":"block"}
   ]'
+  domain_strategy="$(routing_domain_strategy "$ROUTE_PROFILE")" || fatal "Invalid routing profile: $ROUTE_PROFILE"
 
-  tmp="$(mktemp "${CONFIG_DIR}/config.json.tmp.XXXXXX")"
+  tmp="$(mktemp --suffix=.json "${CONFIG_DIR}/config.tmp.XXXXXX")"
   if ! jq -n \
     --argjson port "$PORT" \
     --arg uuid "$UUID" \
@@ -1338,7 +1746,8 @@ write_xray_config_xhttp_tls() {
     --arg xhttp_path "$XHTTP_PATH" \
     --arg tls_cert_file "$TLS_CERT_FILE" \
     --arg tls_key_file "$TLS_KEY_FILE" \
-    --argjson alpn "$XHTTP_ALPN_JSON" \
+    --argjson alpn "$XHTTP_ORIGIN_ALPN_JSON" \
+    --arg domain_strategy "$domain_strategy" \
     --argjson rules "$rules_json" \
     '
     {
@@ -1348,7 +1757,7 @@ write_xray_config_xhttp_tls() {
           port: $port,
           protocol: "vless",
           settings: {
-            clients: [ { id: $uuid } ],
+            clients: [ { id: $uuid, flow: "xtls-rprx-vision" } ],
             decryption: $vdec
           },
           streamSettings: {
@@ -1356,6 +1765,9 @@ write_xray_config_xhttp_tls() {
             security: "tls",
             tlsSettings: {
               alpn: $alpn,
+              minVersion: "1.2",
+              maxVersion: "1.3",
+              rejectUnknownSni: true,
               certificates: [
                 {
                   certificateFile: $tls_cert_file,
@@ -1379,7 +1791,7 @@ write_xray_config_xhttp_tls() {
         { protocol: "blackhole", tag: "block" }
       ],
       routing: {
-        domainStrategy: "AsIs",
+        domainStrategy: $domain_strategy,
         rules: $rules
       }
     }' > "$tmp"; then
@@ -1390,7 +1802,7 @@ write_xray_config_xhttp_tls() {
     rm -f "$tmp"
     fatal_with_rollback "Xray generated temp config test failed"
   fi
-  if ! install -m 600 "$tmp" "$CONFIG_PATH"; then
+  if ! install_generated_config_atomically "$tmp"; then
     rm -f "$tmp"
     fatal_with_rollback "Xray config install failed"
   fi
@@ -1408,15 +1820,16 @@ write_xray_config() {
   # 2. Block private IPs first to avoid proxy access to local/cloud metadata networks.
   # 3. Block BitTorrent traffic that goes through this Xray inbound.
   # 4. Unmatched traffic uses the first outbound (direct); no explicit geolocation-!cn rule is needed.
-  # 5. Keep domainStrategy=AsIs to avoid extra server-side DNS resolution.
-  local tmp rules_json='[
+  # 5. COMPATIBLE uses AsIs; STRICT uses IPIfNonMatch for final-IP enforcement.
+  local tmp domain_strategy rules_json='[
     {"type":"field","ip":["geoip:private"],"outboundTag":"block"},
     {"type":"field","protocol":["bittorrent"],"outboundTag":"block"},
     {"type":"field","domain":["geosite:cn"],"outboundTag":"block"},
     {"type":"field","ip":["geoip:cn"],"outboundTag":"block"}
   ]'
+  domain_strategy="$(routing_domain_strategy "$ROUTE_PROFILE")" || fatal "Invalid routing profile: $ROUTE_PROFILE"
 
-  tmp="$(mktemp "${CONFIG_DIR}/config.json.tmp.XXXXXX")"
+  tmp="$(mktemp --suffix=.json "${CONFIG_DIR}/config.tmp.XXXXXX")"
   if ! jq -n \
     --argjson port "$PORT" \
     --arg uuid "$UUID" \
@@ -1425,6 +1838,7 @@ write_xray_config() {
     --arg private_key "$REALITY_PRIV" \
     --arg short_id "$SHORT_ID" \
     --arg mldsa_seed "$MLDSA_SEED" \
+    --arg domain_strategy "$domain_strategy" \
     --argjson rules "$rules_json" \
     '
     {
@@ -1465,7 +1879,7 @@ write_xray_config() {
         { protocol: "blackhole", tag: "block" }
       ],
       routing: {
-        domainStrategy: "AsIs",
+        domainStrategy: $domain_strategy,
         rules: $rules
       }
     }' > "$tmp"; then
@@ -1476,7 +1890,7 @@ write_xray_config() {
     rm -f "$tmp"
     fatal_with_rollback "Xray generated temp config test failed"
   fi
-  if ! install -m 600 "$tmp" "$CONFIG_PATH"; then
+  if ! install_generated_config_atomically "$tmp"; then
     rm -f "$tmp"
     fatal_with_rollback "Xray config install failed"
   fi
@@ -1534,8 +1948,8 @@ build_link() {
   if [[ "$DEPLOY_MODE" == "cdn-xhttp-tls" ]]; then
     encoded_xhttp_path="$(url_encode "$XHTTP_PATH")"
     encoded_sni="$(url_encode "$SNI")"
-    encoded_alpn="$(printf '%s\n' "$XHTTP_ALPN_JSON" | jq -r 'join(",")' | jq -Rr @uri)"
-    link="vless://${UUID}@${SERVER_HOST_FOR_LINK}:${PORT}?type=xhttp&security=tls&host=${encoded_sni}&path=${encoded_xhttp_path}&mode=auto&fp=chrome&sni=${encoded_sni}&alpn=${encoded_alpn}&encryption=${VLESS_ENC}#${encoded_name}"
+    encoded_alpn="$(printf '%s\n' "$XHTTP_CLIENT_ALPN_JSON" | jq -r 'join(",")' | jq -Rr @uri)"
+    link="vless://${UUID}@${SERVER_HOST_FOR_LINK}:${PORT}?type=xhttp&security=tls&host=${encoded_sni}&path=${encoded_xhttp_path}&mode=auto&fp=chrome&sni=${encoded_sni}&alpn=${encoded_alpn}&flow=xtls-rprx-vision&encryption=${VLESS_ENC}#${encoded_name}"
     echo "$link"
     return 0
   fi
@@ -1581,16 +1995,18 @@ print_result() {
     echo
     ok "Build complete"
     info "Core: Xray-core"
-    info "Mode: VLESS + XHTTP-TLS (CDN)"
+    info "Mode: VLESS Encryption + XHTTP-TLS + Vision (CDN)"
     info "Config: ${CONFIG_PATH}"
     info "UUID: ${UUID}"
     info "TLS/SNI domain: ${SNI}"
     info "XHTTP path: ${XHTTP_PATH}"
-    info "XHTTP ALPN: ${XHTTP_ALPN_CHOICE} ${XHTTP_ALPN_JSON}"
+    info "XHTTP transport: ${XHTTP_TRANSPORT_PROFILE}"
+    info "Origin ALPN: ${XHTTP_ORIGIN_ALPN_JSON}; client ALPN: ${XHTTP_CLIENT_ALPN_JSON}"
     info "Certificate profile: ${TLS_CERT_MODE}"
+    info "Flow: xtls-rprx-vision (keep client Xray-core current)"
     [[ "$TLS_CERT_MODE" == "cloudflare-origin" ]] && warn_cloudflare_origin_ca_scope
     info "Node name: ${NODE_NAME}"
-    info "CN/private route: enabled; unmatched traffic uses the default direct outbound"
+    info "Routing: ${ROUTE_PROFILE} ($(routing_domain_strategy "$ROUTE_PROFILE")); unmatched traffic uses direct"
     info "Link length: ${#link} chars"
     echo
     echo "$link"
@@ -1608,7 +2024,7 @@ print_result() {
   info "shortId：${SHORT_ID}"
   info "节点名称：${NODE_NAME}"
   info "pbk：${REALITY_PUB}"
-  info "CN/private 阻断路由：启用；未命中规则的流量默认 direct"
+  info "路由：${ROUTE_PROFILE} ($(routing_domain_strategy "$ROUTE_PROFILE"))；未命中规则的流量默认 direct"
   info "链接长度：${#link} 字符"
   echo
   echo "$link"
@@ -1665,18 +2081,25 @@ Options:
   --node-name NAME                Share link node name. Default: ${DEFAULT_NODE_NAME}.
   --server HOST_OR_IP             Public server address for the share link.
                                   In XHTTP-TLS mode, omit this to use SNI; set it for preferred CDN IP/hostname.
-  --mode MODE                     1/REALITY-VISION or 2/XHTTP-TLS. Default: REALITY-VISION.
-  --cdn-xhttp-tls                 Shortcut for --mode XHTTP-TLS.
+  --mode MODE                     1/REALITY-VISION or 2/XHTTP-TLS-VISION. Default: REALITY-VISION.
+  --cdn-xhttp-tls                 Shortcut for --mode XHTTP-TLS-VISION.
   --xhttp-path PATH               XHTTP request path for CDN mode.
-  --xhttp-alpn PROFILE            1/STABLE, 2/H2 ONLY, or 3/H3 ONLY. Default: STABLE.
-                                  STABLE keeps the XHTTP server on TCP H1/H2; clients/CDNs may still use H3 before origin.
-                                  Direct H3 makes Xray listen on UDP/443; Prefer real Nginx/Caddy/CDN fronting for H3.
+  --xhttp-profile PROFILE         CDN-STABLE, CDN-H2, CDN-H3, or DIRECT-H3. Default: CDN-STABLE.
+                                  CDN-H3 keeps the Xray origin on TCP H1/H2 and requests H3 only at the CDN edge.
+                                  DIRECT-H3 makes Xray listen on UDP and is an advanced CLI-only diagnostic.
+  --xhttp-alpn PROFILE            Legacy alias: stable/h2/h3 map to CDN-STABLE/CDN-H2/DIRECT-H3.
   --tls-cert-file PATH            TLS certificate file for CDN mode.
   --tls-key-file PATH             TLS private key file for CDN mode.
   --tls-cert-mode MODE            1/PUBLIC CA or 2/CLOUDFLARE ORIGIN CA. Default: PUBLIC CA.
+  --route-profile PROFILE         COMPATIBLE (AsIs) or STRICT (IPIfNonMatch). Default: COMPATIBLE.
   --xray-encryption MODE          x25519, ml-kem-768, or none. Default: x25519.
+                                  XHTTP-TLS-VISION clients should use a current Xray-core-compatible implementation.
   --enable-mldsa                  Enable Xray ML-DSA-65 extra signature.
   --skip-sni-check                Skip SNI HTTPS reachability and latency checks.
+  --skip-asn-check                Skip the advisory REALITY VPS/target ASN comparison.
+  --allow-nonstandard-reality-port
+                                  Explicitly allow REALITY to listen on a port other than TCP/443.
+  --update-xray                   Update Xray through the official XTLS installer before deployment.
   --check, --preflight            Run read-only preflight checks and exit.
   --yes, -y                       Auto-confirm installer prompts.
   --no-qr                         Skip QR output.
@@ -1690,14 +2113,19 @@ Environment:
   FREEDOM_SERVER=1.2.3.4
   FREEDOM_MODE=reality|cdn-xhttp-tls
   FREEDOM_XHTTP_PATH=/cdn-random
-  FREEDOM_XHTTP_ALPN=stable|h2|h3
+  FREEDOM_XHTTP_PROFILE=cdn-stable|cdn-h2|cdn-h3|direct-h3
+  FREEDOM_XHTTP_ALPN=stable|h2|h3  # legacy alias
   FREEDOM_TLS_CERT_FILE=/path/fullchain.pem
   FREEDOM_TLS_KEY_FILE=/path/privkey.pem
   FREEDOM_TLS_CERT_MODE=public|cloudflare-origin
+  FREEDOM_ROUTE_PROFILE=compatible|strict
   FREEDOM_XRAY_ENCRYPTION=x25519
   FREEDOM_MLDSA=0|1
   FREEDOM_SNI_CHECK=0|1
   FREEDOM_SNI_CHECK_TIMEOUT=8
+  FREEDOM_ASN_CHECK=0|1
+  FREEDOM_ALLOW_NONSTANDARD_REALITY_PORT=0|1
+  FREEDOM_UPDATE_XRAY=0|1
   FREEDOM_YES=1
   FREEDOM_NO_QR=1
 EOF2
@@ -1754,7 +2182,12 @@ handle_cli() {
       --xhttp-alpn)
         shift
         require_option_value "--xhttp-alpn" "${1:-}"
-        XHTTP_ALPN_CHOICE="$(normalize_xhttp_alpn_choice "$1")" || usage_error "Invalid --xhttp-alpn: $1"
+        XHTTP_TRANSPORT_PROFILE="$(normalize_xhttp_transport_profile "$1")" || usage_error "Invalid --xhttp-alpn: $1"
+        ;;
+      --xhttp-profile)
+        shift
+        require_option_value "--xhttp-profile" "${1:-}"
+        XHTTP_TRANSPORT_PROFILE="$(normalize_xhttp_transport_profile "$1")" || usage_error "Invalid --xhttp-profile: $1"
         ;;
       --tls-cert-file)
         shift
@@ -1771,6 +2204,11 @@ handle_cli() {
         require_option_value "--tls-cert-mode" "${1:-}"
         TLS_CERT_MODE="$(normalize_tls_cert_mode "$1")" || usage_error "Invalid --tls-cert-mode: $1"
         ;;
+      --route-profile)
+        shift
+        require_option_value "--route-profile" "${1:-}"
+        ROUTE_PROFILE="$(normalize_route_profile "$1")" || usage_error "Invalid --route-profile: $1"
+        ;;
       --xray-encryption)
         shift
         require_option_value "--xray-encryption" "${1:-}"
@@ -1781,6 +2219,15 @@ handle_cli() {
         ;;
       --skip-sni-check)
         SNI_CHECK=0
+        ;;
+      --skip-asn-check)
+        ASN_CHECK=0
+        ;;
+      --allow-nonstandard-reality-port)
+        ALLOW_NONSTANDARD_REALITY_PORT=1
+        ;;
+      --update-xray)
+        UPDATE_XRAY=1
         ;;
       --check|--preflight)
         CHECK_ONLY=1
@@ -1811,6 +2258,7 @@ main() {
   sync_time_best_effort
   ensure_xray_installed
   read_common_inputs
+  ensure_xray_capabilities
   check_port_available_or_handle
   generate_assets
   backup_existing_config

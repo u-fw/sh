@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Init Tool v1.0.14
+# VPS Init Tool v1.2.1
 # Debian/Ubuntu VPS bootstrap, audit and maintenance helper.
 # Scope: memory, SSH, UFW firewall, Fail2ban, DNS, logs, basic network tuning.
 # Principle: audit first, confirm before risky changes.
 
-TOOL_VERSION="1.0.14"
+TOOL_VERSION="1.2.1"
 SCRIPT_NAME="VPS Init Tool"
 BACKUP_ROOT="/root/vps-init-backups"
 SWAPFILE="/swapfile"
+AUTO_UPGRADES_CONFIG="/etc/apt/apt.conf.d/52-vps-init-auto-upgrades"
 CF_IPV4_URL="https://www.cloudflare.com/ips-v4"
 CF_IPV6_URL="https://www.cloudflare.com/ips-v6"
 UFW_CF_STATE_FILE="/var/lib/vps-init/cloudflare-ufw-managed.tsv"
 UFW_CF_LOCK_FILE="/var/lib/vps-init/cloudflare-ufw.lock"
+UFW_CF_IPV4_FILE="${VPS_INIT_CF_IPV4_FILE:-/var/lib/vps-init/cloudflare-ips-v4.txt}"
+UFW_CF_IPV6_FILE="${VPS_INIT_CF_IPV6_FILE:-/var/lib/vps-init/cloudflare-ips-v6.txt}"
 UFW_CF_LOCK_TIMEOUT="${VPS_INIT_CF_LOCK_TIMEOUT:-120}"
 SSH_HARDENING_FRAGMENT="/etc/ssh/sshd_config.d/00-vps-init-hardening.conf"
 LOG_FILE="${VPS_INIT_LOG:-/var/log/vps-init-tool.log}"
@@ -29,7 +32,7 @@ BACKUP_LAST_PATH=""
 # ---------- i18n / UI ----------
 normalize_lang() {
   case "${1:-}" in
-    zh|zh-cn|zh_CN|cn|CN|chinese|Chinese) echo "cn" ;;
+    zh|zh-cn|zh_CN|cn|CN|chinese|Chinese) echo "en" ;;
     en|EN|english|English) echo "en" ;;
     *) echo "en" ;;
   esac
@@ -123,10 +126,10 @@ choose_language() {
   if [ -t 0 ] && [ -z "${VPS_INIT_LANG:-}" ]; then
     echo "Language / language:"
     echo "1) English"
-    echo "2) Chinese"
+    echo "2) Chinese alias (English-safe fallback)"
     read -r -p "Choose [1/2, default 1]: " ans || true
     case "$ans" in
-      2|cn|CN|zh|chinese|Chinese) LANG_MODE="cn" ;;
+      2|cn|CN|zh|chinese|Chinese) LANG_MODE="en" ;;
       *) LANG_MODE="en" ;;
     esac
   fi
@@ -153,7 +156,12 @@ os_support_level() {
   load_os_release
   case "${ID:-}" in
     debian|ubuntu) echo "full" ;;
-    *) echo "audit-only" ;;
+    *)
+      case " ${ID_LIKE:-} " in
+        *" debian "*|*" ubuntu "*) echo "derivative-audit" ;;
+        *) echo "audit-only" ;;
+      esac
+      ;;
   esac
 }
 
@@ -162,7 +170,10 @@ require_debian_family() {
   case "${ID:-}" in
     debian|ubuntu) return 0 ;;
     *)
-      red "$(m "This script is intended for Debian/Ubuntu family systems. Detected: ${PRETTY_NAME:-unknown}" "This script is intended for Debian/Ubuntu family systems. Detected: ${PRETTY_NAME:-unknown}")"
+      red "$(m "Mutating commands officially support Debian and Ubuntu only. Detected: ${PRETTY_NAME:-unknown}" "Mutating commands officially support Debian and Ubuntu only. Detected: ${PRETTY_NAME:-unknown}")"
+      if [ "$(os_support_level)" = "derivative-audit" ]; then
+        status_info "$(m 'A Debian/Ubuntu derivative was detected; read-only audit commands remain available.' 'A Debian/Ubuntu derivative was detected; read-only audit commands remain available.')"
+      fi
       exit 1
       ;;
   esac
@@ -267,6 +278,12 @@ restore_managed_file() {
   else
     rm -f "$target"
   fi
+}
+
+restore_sysctl_file() {
+  local config_file="$1"
+  [ -e "$config_file" ] || return 0
+  sysctl -p "$config_file" >/dev/null 2>&1 || status_warn "$(m "Failed to re-apply restored sysctl file: $config_file" "Failed to re-apply restored sysctl file: $config_file")"
 }
 
 # ---------- package helpers ----------
@@ -432,6 +449,19 @@ valid_systemd_timespan() {
   [[ "${1:-}" =~ ^[0-9]+(s|min|h|day|week|month|year)$ ]]
 }
 
+apt_config_value_from_text() {
+  local text="$1" key="$2"
+  awk -v key="$key" '
+    $1 == key {
+      value=$2
+      sub(/^"/, "", value)
+      sub(/";$/, "", value)
+      print value
+      exit
+    }
+  ' <<< "$text"
+}
+
 listening_ports_compact() {
   local tmp
   tmp="$(mktemp)"
@@ -507,12 +537,28 @@ EOF2
   if ! sysctl -p /etc/sysctl.d/99-memory-tuning.conf >/dev/null; then
     red "$(m 'Failed to apply memory sysctl settings. Restoring the previous configuration.' 'Failed to apply memory sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
-    if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
+    restore_sysctl_file "$config_file"
     return 1
   fi
 }
 
 # ---------- system / audit ----------
+basic_tools_missing() {
+  local cmd missing=()
+  for cmd in curl jq openssl lsof dig ss flock rsync unzip; do
+    has_cmd "$cmd" || missing+=("$cmd")
+  done
+  if [ ! -d /etc/ssl/certs ]; then missing+=("ca-certificates"); fi
+  printf '%s\n' "${missing[*]:-}"
+}
+
+install_essential_tools() {
+  blue "$(m 'Installing essential administration tools...' 'Installing essential administration tools...')"
+  apt_install \
+    curl ca-certificates jq openssl lsof dnsutils iproute2 util-linux rsync unzip || return 1
+  green "$(m 'Essential administration tools installed.' 'Essential administration tools installed.')"
+}
+
 install_basic_tools() {
   blue "$(m 'Installing basic tools...' 'Installing basic tools...')"
   apt_install \
@@ -524,8 +570,8 @@ install_basic_tools() {
     openssl rsync screen tmux || return 1
 
   if is_systemd; then
-    systemctl enable cron >/dev/null 2>&1 || true
-    systemctl enable sysstat >/dev/null 2>&1 || true
+    systemctl enable cron >/dev/null 2>&1 || status_warn "$(m 'Failed to enable cron service; scheduled jobs may not run after reboot.' 'Failed to enable cron service; scheduled jobs may not run after reboot.')"
+    systemctl enable sysstat >/dev/null 2>&1 || status_warn "$(m 'Failed to enable sysstat service; historical system metrics may be unavailable after reboot.' 'Failed to enable sysstat service; historical system metrics may be unavailable after reboot.')"
   fi
   green "$(m 'Basic tools installed.' 'Basic tools installed.')"
 }
@@ -563,11 +609,13 @@ print_recommended_workflow() {
   section "$(m 'Recommended workflow' 'Recommended workflow')"
   if [ "$support" = "full" ]; then
     status_info "1. bash vps_init_tool.sh --preflight"
-    status_info "2. sudo bash vps_init_tool.sh --audit"
-    status_info "3. sudo bash vps_init_tool.sh --baseline --yes"
-    status_info "4. sudo bash vps_init_tool.sh --ssh-audit"
-    status_info "5. sudo bash vps_init_tool.sh --ufw-audit"
-    status_info "6. sudo bash vps_init_tool.sh --ufw-cf-sync --ports 80,443 --yes"
+    status_info "2. bash vps_init_tool.sh --optimize-check"
+    status_info "3. sudo bash vps_init_tool.sh --optimize-auto --yes"
+    status_info "4. sudo bash vps_init_tool.sh --audit"
+    status_info "5. sudo bash vps_init_tool.sh --ssh-audit"
+    status_info "6. sudo bash vps_init_tool.sh --ufw-audit"
+    status_info "7. sudo bash vps_init_tool.sh --ufw-cf-sync --ports 80,443 --yes"
+    status_info "8. bash vps_init_tool.sh --updates-audit"
     status_info "$(m 'Apply SSH/UFW/Fail2ban changes only after confirming current SSH access is protected.' 'Apply SSH/UFW/Fail2ban changes only after confirming current SSH access is protected.')"
   else
     status_warn "$(m 'Do not run mutating commands on this OS. Use read-only checks only:' 'Do not run mutating commands on this OS. Use read-only checks only:')"
@@ -587,15 +635,22 @@ compatibility_report() {
   title "$(m 'Compatibility report' 'Compatibility report')"
   kv "OS" "${PRETTY_NAME:-unknown}"
   kv "ID" "${ID:-unknown}"
+  kv "ID_LIKE" "${ID_LIKE:-none}"
   kv "Package manager" "$pm"
   kv "Support level" "$support"
 
   echo
-  if [ "$support" = "full" ]; then
-    status_ok "$(m 'Full support: Debian/Ubuntu family with apt-get.' 'Full support: Debian/Ubuntu family with apt-get.')"
-  else
-    status_warn "$(m 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.' 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.')"
-  fi
+  case "$support" in
+    full)
+      status_ok "$(m 'Full support: official Debian or Ubuntu with apt-get.' 'Full support: official Debian or Ubuntu with apt-get.')"
+      ;;
+    derivative-audit)
+      status_warn "$(m 'Derivative detected: read-only audits are supported, but mutating modules are intentionally blocked.' 'Derivative detected: read-only audits are supported, but mutating modules are intentionally blocked.')"
+      ;;
+    *)
+      status_warn "$(m 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.' 'Audit-only support: mutating modules are intentionally blocked outside Debian/Ubuntu.')"
+      ;;
+  esac
 
   if is_systemd; then
     status_ok "$(m 'systemd detected; service modules can operate.' 'systemd detected; service modules can operate.')"
@@ -603,11 +658,12 @@ compatibility_report() {
     status_warn "$(m 'systemd not detected; service reload/start modules may be unavailable.' 'systemd not detected; service reload/start modules may be unavailable.')"
   fi
 
-  has_cmd sshd && status_ok "sshd: available" || status_warn "sshd: missing"
-  has_cmd ufw && status_ok "ufw: available" || status_info "ufw: missing; install module requires full support"
-  has_cmd fail2ban-client && status_ok "fail2ban: available" || status_info "fail2ban: missing; install module requires full support"
-  has_cmd sysctl && status_ok "sysctl: available" || status_warn "sysctl: missing"
-  has_cmd ss && status_ok "ss: available" || status_info "ss: missing; port diagnostics are reduced"
+  if has_cmd sshd; then status_ok "sshd: available"; else status_warn "sshd: missing"; fi
+  if has_cmd ufw; then status_ok "ufw: available"; else status_info "ufw: missing; install module requires full support"; fi
+  if has_cmd fail2ban-client; then status_ok "fail2ban: available"; else status_info "fail2ban: missing; install module requires full support"; fi
+  if has_cmd unattended-upgrade; then status_ok "unattended-upgrades: available"; else status_info "unattended-upgrades: missing; security updates module can install it"; fi
+  if has_cmd sysctl; then status_ok "sysctl: available"; else status_warn "sysctl: missing"; fi
+  if has_cmd ss; then status_ok "ss: available"; else status_info "ss: missing; port diagnostics are reduced"; fi
 
   echo
   status_info "$(m 'This report is read-only. Use --preflight for broader environment checks.' 'This report is read-only. Use --preflight for broader environment checks.')"
@@ -632,25 +688,27 @@ doctor_report() {
   kv "Systemd" "$systemd_state"
 
   section "$(m 'Read-only module readiness' 'Read-only module readiness')"
-  [ "$support" = "full" ] && status_ok "OS support: full" || status_warn "OS support: audit-only"
-  [ "$pm" = "apt" ] && status_ok "Package installs: apt available" || status_warn "Package installs: unavailable for this script"
-  [ "$systemd_state" = "yes" ] && status_ok "Service management: systemd available" || status_warn "Service management: systemd unavailable"
-  has_cmd sshd && status_ok "SSH audit: sshd available" || status_warn "SSH audit: sshd missing"
-  has_cmd ufw && status_ok "UFW audit: ufw available" || status_info "UFW audit: ufw missing"
-  has_cmd fail2ban-client && status_ok "Fail2ban audit: fail2ban-client available" || status_info "Fail2ban audit: fail2ban-client missing"
-  has_cmd resolvectl && status_ok "DNS audit: resolvectl available" || status_info "DNS audit: resolvectl missing; /etc/resolv.conf still checked"
-  has_cmd journalctl && status_ok "Logs audit: journalctl available" || status_info "Logs audit: journalctl missing; /var/log still checked"
-  has_cmd ss && status_ok "Port diagnostics: ss available" || status_info "Port diagnostics: ss missing"
+  if [ "$support" = "full" ]; then status_ok "OS support: full"; else status_warn "OS support: audit-only"; fi
+  if [ "$pm" = "apt" ]; then status_ok "Package installs: apt available"; else status_warn "Package installs: unavailable for this script"; fi
+  if [ "$systemd_state" = "yes" ]; then status_ok "Service management: systemd available"; else status_warn "Service management: systemd unavailable"; fi
+  if has_cmd sshd; then status_ok "SSH audit: sshd available"; else status_warn "SSH audit: sshd missing"; fi
+  if has_cmd ufw; then status_ok "UFW audit: ufw available"; else status_info "UFW audit: ufw missing"; fi
+  if has_cmd fail2ban-client; then status_ok "Fail2ban audit: fail2ban-client available"; else status_info "Fail2ban audit: fail2ban-client missing"; fi
+  if has_cmd unattended-upgrade; then status_ok "Security updates: unattended-upgrade available"; else status_info "Security updates: unattended-upgrades not installed"; fi
+  if has_cmd resolvectl; then status_ok "DNS audit: resolvectl available"; else status_info "DNS audit: resolvectl missing; /etc/resolv.conf still checked"; fi
+  if has_cmd journalctl; then status_ok "Logs audit: journalctl available"; else status_info "Logs audit: journalctl missing; /var/log still checked"; fi
+  if has_cmd ss; then status_ok "Port diagnostics: ss available"; else status_info "Port diagnostics: ss missing"; fi
 
   section "$(m 'Recommended commands' 'Recommended commands')"
   status_info "bash vps_init_tool.sh --compat"
   status_info "bash vps_init_tool.sh --preflight"
+  status_info "bash vps_init_tool.sh --optimize-check"
   if [ "$root_state" = "yes" ]; then
+    status_info "bash vps_init_tool.sh --optimize-auto --yes"
     status_info "bash vps_init_tool.sh --audit"
-    status_info "bash vps_init_tool.sh --baseline --yes"
   else
+    status_info "sudo bash vps_init_tool.sh --optimize-auto --yes"
     status_info "sudo bash vps_init_tool.sh --audit"
-    status_info "sudo bash vps_init_tool.sh --baseline --yes"
   fi
   print_recommended_workflow "$support"
 }
@@ -684,18 +742,19 @@ preflight_check() {
   if [ -d /etc/ssl/certs ]; then status_ok "ca-certificates"; else status_warn "$(m 'Certificate store not found; ensure HTTPS downloads work.' 'Certificate store not found; ensure HTTPS downloads work.')"; fi
 
   if has_cmd sshd; then
-    status_ok "$(m "sshd detected; effective port(s): $(current_ssh_ports)" "sshd detected; effective port(s): $(current_ssh_ports)"): $(current_ssh_ports)")")"
+    status_ok "$(m "sshd detected; effective port(s): $(current_ssh_ports)" "sshd detected; effective port(s): $(current_ssh_ports)")"
   else
     status_warn "$(m 'sshd not found; SSH hardening/audit will be unavailable.' 'sshd not found; SSH hardening/audit will be unavailable.')"
   fi
 
   if has_cmd ufw; then status_info "$(m 'UFW is installed.' 'UFW is installed.')"; else status_info "$(m 'UFW is not installed; firewall module can install it.' 'UFW is not installed; firewall module can install it.')"; fi
   if has_cmd fail2ban-client; then status_info "$(m 'Fail2ban is installed.' 'Fail2ban is installed.')"; else status_info "$(m 'Fail2ban is not installed; fail2ban module can install it.' 'Fail2ban is not installed; fail2ban module can install it.')"; fi
+  if has_cmd unattended-upgrade; then status_info "$(m 'unattended-upgrades is installed.' 'unattended-upgrades is installed.')"; else status_info "$(m 'unattended-upgrades is not installed; the security updates module can install it.' 'unattended-upgrades is not installed; the security updates module can install it.')"; fi
 
   echo
   status_info "$(m 'Preflight is read-only. No settings were changed.' 'Preflight is read-only. No settings were changed.')"
   if [ "$(id -u 2>/dev/null || echo 1)" -ne 0 ]; then
-    status_info "$(m 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.' 'Run with sudo/root for --audit, --baseline, SSH, UFW, DNS, and service changes.')"
+    status_info "$(m 'Run with sudo/root for --optimize-auto, --audit, SSH, UFW, DNS, and service changes.' 'Run with sudo/root for --optimize-auto, --audit, SSH, UFW, DNS, and service changes.')"
   fi
   print_recommended_workflow "$(os_support_level)"
 }
@@ -739,8 +798,34 @@ memory_report() {
 }
 
 # ---------- memory ----------
+cleanup_failed_swapfile_creation() {
+  local path="${1:-$SWAPFILE}"
+  if [ "$path" = "$SWAPFILE" ]; then swapoff "$SWAPFILE" 2>/dev/null || true; fi
+  rm -f -- "$path"
+}
+
+restore_previous_swapfile() {
+  local old_swap_backup="$1" swap_was_active="${2:-0}"
+  [ -n "$old_swap_backup" ] && [ -e "$old_swap_backup" ] || return 0
+  rm -f -- "$SWAPFILE"
+  if ! mv "$old_swap_backup" "$SWAPFILE"; then
+    status_warn "$(m "Failed to restore previous swapfile: $old_swap_backup" "Failed to restore previous swapfile: $old_swap_backup")"
+    return 1
+  fi
+  if [ "$swap_was_active" = "1" ]; then
+    swapon -p 10 "$SWAPFILE" || status_warn "$(m 'Failed to reactivate previous swapfile. Check swap manually.' 'Failed to reactivate previous swapfile. Check swap manually.')"
+  fi
+}
+
+rollback_new_swapfile() {
+  local old_swap_backup="$1" swap_was_active="${2:-0}"
+  cleanup_failed_swapfile_creation
+  restore_previous_swapfile "$old_swap_backup" "$swap_was_active"
+}
+
 setup_swapfile() {
-  local size swappiness vfs_cache_pressure mb
+  local size swappiness vfs_cache_pressure mb expected_bytes actual_bytes allocated=0
+  local swap_was_active=0 old_swap_backup="" new_swap_tmp="" fstab_backup=""
   size="$(input_default "$(m 'Swapfile size; use 0 to skip' 'Swapfile size; use 0 to skip')" "$(recommend_swap_size)")"
   case "$size" in 0|0M|0m|0G|0g) yellow "$(m 'Swapfile skipped.' 'Swapfile skipped.')"; return 0 ;; esac
   valid_size_mb_gb "$size" || { red "$(m 'Invalid swapfile size. Use a positive value such as 512M, 2G, or 2048.' 'Invalid swapfile size. Use a positive value such as 512M, 2G, or 2048.')"; return 1; }
@@ -752,26 +837,96 @@ setup_swapfile() {
 
   blue "$(m "Configuring $SWAPFILE size=$size" "Configuring $SWAPFILE size=$size")"
   if swapon --show | awk '{print $1}' | grep -qx "$SWAPFILE"; then
-    yellow "$(m "$SWAPFILE is currently active. To recreate it, it must be swapoff first." "$SWAPFILE is currently active. To recreate it, it must be swapoff first.")"
+    swap_was_active=1
+    yellow "$(m "$SWAPFILE is currently active and will be briefly replaced after the new swapfile is ready." "$SWAPFILE is currently active and will be briefly replaced after the new swapfile is ready.")"
     confirm_yes "$(m "Recreate active $SWAPFILE?" "Recreate active $SWAPFILE?")" || return 0
-    swapoff "$SWAPFILE" || { red "$(m 'swapoff failed. Memory may be too tight. Aborting.' 'swapoff failed. Memory may be too tight. Aborting.')"; return 1; }
   elif [ -e "$SWAPFILE" ]; then
     confirm_yes "$(m "$SWAPFILE exists and will be reformatted. Continue?" "$SWAPFILE exists and will be reformatted. Continue?")" || return 0
   fi
 
-  rm -f "$SWAPFILE"
-  if has_cmd fallocate; then fallocate -l "$size" "$SWAPFILE" || true; fi
-  if [ ! -s "$SWAPFILE" ]; then
-    dd if=/dev/zero of="$SWAPFILE" bs=1M count="$mb" status=progress
+  new_swap_tmp="$(mktemp "${SWAPFILE}.new.XXXXXX")" || return 1
+  expected_bytes=$((mb * 1024 * 1024))
+  if has_cmd fallocate && fallocate -l "$size" "$new_swap_tmp"; then
+    actual_bytes="$(stat -c %s "$new_swap_tmp" 2>/dev/null || echo 0)"
+    [ "$actual_bytes" -eq "$expected_bytes" ] && allocated=1
+  fi
+  if [ "$allocated" -ne 1 ]; then
+    : > "$new_swap_tmp"
+    if ! dd if=/dev/zero of="$new_swap_tmp" bs=1M count="$mb" status=progress; then
+      red "$(m 'Failed to create swapfile data. Cleaning up partial file.' 'Failed to create swapfile data. Cleaning up partial file.')"
+      cleanup_failed_swapfile_creation "$new_swap_tmp"
+      return 1
+    fi
+  fi
+  actual_bytes="$(stat -c %s "$new_swap_tmp" 2>/dev/null || echo 0)"
+  if [ "$actual_bytes" -ne "$expected_bytes" ]; then
+    red "$(m 'Swapfile size verification failed. Cleaning up partial file.' 'Swapfile size verification failed. Cleaning up partial file.')"
+    cleanup_failed_swapfile_creation "$new_swap_tmp"
+    return 1
   fi
 
-  chmod 600 "$SWAPFILE"
-  mkswap "$SWAPFILE"
-  swapon -p 10 "$SWAPFILE"
+  if ! chmod 600 "$new_swap_tmp"; then
+    red "$(m 'Failed to set swapfile permissions. Cleaning up partial file.' 'Failed to set swapfile permissions. Cleaning up partial file.')"
+    cleanup_failed_swapfile_creation "$new_swap_tmp"
+    return 1
+  fi
+  if ! mkswap "$new_swap_tmp"; then
+    red "$(m 'Failed to format swapfile. Cleaning up partial file.' 'Failed to format swapfile. Cleaning up partial file.')"
+    cleanup_failed_swapfile_creation "$new_swap_tmp"
+    return 1
+  fi
+  if [ -e "$SWAPFILE" ]; then
+    old_swap_backup="$(mktemp "${SWAPFILE}.old.XXXXXX")" || {
+      red "$(m 'Failed to reserve previous swapfile backup path. Aborting.' 'Failed to reserve previous swapfile backup path. Aborting.')"
+      if [ "$swap_was_active" = "1" ]; then swapon -p 10 "$SWAPFILE" 2>/dev/null || true; fi
+      cleanup_failed_swapfile_creation "$new_swap_tmp"
+      return 1
+    }
+    if [ "$swap_was_active" = "1" ] && ! swapoff "$SWAPFILE"; then
+      red "$(m 'swapoff failed. Memory may be too tight. Aborting.' 'swapoff failed. Memory may be too tight. Aborting.')"
+      cleanup_files "$old_swap_backup" "$new_swap_tmp"
+      return 1
+    fi
+    if ! mv "$SWAPFILE" "$old_swap_backup"; then
+      red "$(m 'Failed to preserve previous swapfile. Aborting.' 'Failed to preserve previous swapfile. Aborting.')"
+      if [ "$swap_was_active" = "1" ]; then swapon -p 10 "$SWAPFILE" 2>/dev/null || true; fi
+      cleanup_files "$old_swap_backup"
+      cleanup_failed_swapfile_creation "$new_swap_tmp"
+      return 1
+    fi
+  fi
+  if ! mv "$new_swap_tmp" "$SWAPFILE"; then
+    red "$(m 'Failed to install new swapfile. Restoring previous swapfile.' 'Failed to install new swapfile. Restoring previous swapfile.')"
+    cleanup_failed_swapfile_creation "$new_swap_tmp"
+    restore_previous_swapfile "$old_swap_backup" "$swap_was_active"
+    return 1
+  fi
+  if ! swapon -p 10 "$SWAPFILE"; then
+    red "$(m 'Failed to activate swapfile. Cleaning up partial file.' 'Failed to activate swapfile. Cleaning up partial file.')"
+    cleanup_failed_swapfile_creation
+    restore_previous_swapfile "$old_swap_backup" "$swap_was_active"
+    return 1
+  fi
 
-  backup_path /etc/fstab >/dev/null
-  grep -qE "^[^#]*[[:space:]]${SWAPFILE}[[:space:]]" /etc/fstab || echo "$SWAPFILE none swap sw,pri=10 0 0" >> /etc/fstab
-  apply_memory_sysctl "$swappiness" "$vfs_cache_pressure"
+  if ! backup_path /etc/fstab >/dev/null; then
+    red "$(m 'Failed to back up /etc/fstab. Restoring previous swapfile.' 'Failed to back up /etc/fstab. Restoring previous swapfile.')"
+    rollback_new_swapfile "$old_swap_backup" "$swap_was_active"
+    return 1
+  fi
+  fstab_backup="$BACKUP_LAST_PATH"
+  if ! grep -qE "^[^#]*[[:space:]]${SWAPFILE}[[:space:]]" /etc/fstab; then
+    if ! echo "$SWAPFILE none swap sw,pri=10 0 0" >> /etc/fstab; then
+      red "$(m 'Failed to update /etc/fstab. Restoring previous swapfile.' 'Failed to update /etc/fstab. Restoring previous swapfile.')"
+      restore_managed_file /etc/fstab "$fstab_backup"
+      rollback_new_swapfile "$old_swap_backup" "$swap_was_active"
+      return 1
+    fi
+  fi
+  cleanup_files "$old_swap_backup"
+  if ! apply_memory_sysctl "$swappiness" "$vfs_cache_pressure"; then
+    status_warn "$(m 'Swapfile is active, but VM sysctl tuning failed.' 'Swapfile is active, but VM sysctl tuning failed.')"
+    return 1
+  fi
 
   green "$(m 'Swapfile configured.' 'Swapfile configured.')"
   free -h
@@ -794,37 +949,80 @@ stop_known_zram_services() {
 }
 
 setup_zram_generator() {
-  local size_expr algo
+  local size_expr algo config_file="/etc/systemd/zram-generator.conf" config_backup="" config_tmp=""
   size_expr="$(input_default "$(m 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)' 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)')" "$(recommend_zram_size)")"
   algo="$(input_default "$(m 'Compression algorithm' 'Compression algorithm')" "zstd")"
-  apt_install systemd-zram-generator
-  mkdir -p /etc/systemd
-  backup_path /etc/systemd/zram-generator.conf >/dev/null
-  cat > /etc/systemd/zram-generator.conf <<EOF2
+  apt_install systemd-zram-generator || return 1
+  mkdir -p /etc/systemd || return 1
+  backup_path "$config_file" >/dev/null || return 1
+  config_backup="$BACKUP_LAST_PATH"
+  config_tmp="$(mktemp /etc/systemd/.zram-generator.conf.XXXXXX)" || return 1
+  if ! cat > "$config_tmp" <<EOF2
 [zram0]
 zram-size = $size_expr
 compression-algorithm = $algo
-  swap-priority = 100
+swap-priority = 100
 EOF2
-  systemctl daemon-reload
-  systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || systemctl start systemd-zram-setup@zram0.service
+  then
+    cleanup_files "$config_tmp"
+    return 1
+  fi
+  chmod 644 "$config_tmp" || { cleanup_files "$config_tmp"; return 1; }
+  mv -f -- "$config_tmp" "$config_file" || { cleanup_files "$config_tmp"; return 1; }
+  if ! systemctl daemon-reload || ! { systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || systemctl start systemd-zram-setup@zram0.service; }; then
+    red "$(m 'ZRAM generator activation failed. Restoring the previous configuration.' 'ZRAM generator activation failed. Restoring the previous configuration.')"
+    systemctl stop systemd-zram-setup@zram0.service 2>/dev/null || true
+    if ! restore_managed_file "$config_file" "$config_backup"; then
+      status_bad "$(m 'Failed to restore the previous ZRAM generator configuration.' 'Failed to restore the previous ZRAM generator configuration.')"
+      return 1
+    fi
+    systemctl daemon-reload || status_warn "$(m 'Failed to reload systemd after ZRAM generator rollback.' 'Failed to reload systemd after ZRAM generator rollback.')"
+    if [ -n "$config_backup" ]; then
+      systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || status_warn "$(m 'Previous ZRAM generator configuration was restored but could not be restarted.' 'Previous ZRAM generator configuration was restored but could not be restarted.')"
+    fi
+    return 1
+  fi
 }
 
 setup_zram_tools() {
-  local size_hint_mb="$1"
-  apt_install zram-tools
-  backup_path /etc/default/zramswap >/dev/null
-  if [ -f /etc/default/zramswap ]; then
-    sed -i 's/^#\?ALGO=.*/ALGO=zstd/' /etc/default/zramswap 2>/dev/null || true
+  local size_hint_mb="$1" config_file="/etc/default/zramswap" config_backup=""
+  apt_install zram-tools || return 1
+  backup_path "$config_file" >/dev/null || return 1
+  config_backup="$BACKUP_LAST_PATH"
+  if [ -f "$config_file" ]; then
+    sed -i 's/^#\?ALGO=.*/ALGO=zstd/' "$config_file" || return 1
     if [[ "$size_hint_mb" =~ ^[0-9]+[Mm]?$ ]]; then
       size_hint_mb="${size_hint_mb%M}"; size_hint_mb="${size_hint_mb%m}"
-      grep -q '^SIZE=' /etc/default/zramswap 2>/dev/null && sed -i "s/^#\?SIZE=.*/SIZE=${size_hint_mb}/" /etc/default/zramswap || echo "SIZE=${size_hint_mb}" >> /etc/default/zramswap
+      if grep -q '^#\?SIZE=' "$config_file"; then
+        sed -i "s/^#\?SIZE=.*/SIZE=${size_hint_mb}/" "$config_file" || return 1
+      else
+        echo "SIZE=${size_hint_mb}" >> "$config_file" || return 1
+      fi
     else
-      sed -i 's/^#\?PERCENT=.*/PERCENT=50/' /etc/default/zramswap 2>/dev/null || true
+      if grep -q '^#\?PERCENT=' "$config_file"; then
+        sed -i 's/^#\?PERCENT=.*/PERCENT=50/' "$config_file" || return 1
+      else
+        echo 'PERCENT=50' >> "$config_file" || return 1
+      fi
     fi
-    grep -q '^PRIORITY=' /etc/default/zramswap 2>/dev/null && sed -i 's/^#\?PRIORITY=.*/PRIORITY=100/' /etc/default/zramswap || echo 'PRIORITY=100' >> /etc/default/zramswap
+    if grep -q '^#\?PRIORITY=' "$config_file"; then
+      sed -i 's/^#\?PRIORITY=.*/PRIORITY=100/' "$config_file" || return 1
+    else
+      echo 'PRIORITY=100' >> "$config_file" || return 1
+    fi
   fi
-  systemctl restart zramswap.service 2>/dev/null || systemctl restart zram-config.service
+  if ! { systemctl restart zramswap.service 2>/dev/null || systemctl restart zram-config.service 2>/dev/null; }; then
+    red "$(m 'ZRAM tools activation failed. Restoring the previous configuration.' 'ZRAM tools activation failed. Restoring the previous configuration.')"
+    systemctl stop zramswap.service zram-config.service 2>/dev/null || true
+    if ! restore_managed_file "$config_file" "$config_backup"; then
+      status_bad "$(m 'Failed to restore the previous zram-tools configuration.' 'Failed to restore the previous zram-tools configuration.')"
+      return 1
+    fi
+    if [ -n "$config_backup" ]; then
+      systemctl restart zramswap.service 2>/dev/null || systemctl restart zram-config.service 2>/dev/null || status_warn "$(m 'Previous zram-tools configuration was restored but could not be restarted.' 'Previous zram-tools configuration was restored but could not be restarted.')"
+    fi
+    return 1
+  fi
 }
 
 setup_zram_fallback() {
@@ -881,13 +1079,13 @@ setup_zram() {
   zram_supported || { red "$(m 'ZRAM not supported by this kernel/VPS layer.' 'ZRAM not supported by this kernel/VPS layer.')"; return 1; }
 
   size_hint="$(recommend_zram_size)"
-  apt_update_once
+  apt_update_once || return 1
   if apt-cache show systemd-zram-generator >/dev/null 2>&1; then
     stop_known_zram_services
-    setup_zram_generator || { stop_known_zram_services; setup_zram_fallback; }
+    setup_zram_generator || return 1
   elif apt-cache show zram-tools >/dev/null 2>&1; then
     stop_known_zram_services
-    setup_zram_tools "$size_hint" || { stop_known_zram_services; setup_zram_fallback; }
+    setup_zram_tools "$size_hint" || return 1
   else
     stop_known_zram_services
     setup_zram_fallback
@@ -934,6 +1132,21 @@ bbr_supported() {
   grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null
 }
 
+bbr_available_readonly() {
+  local kernel_config=""
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && return 0
+  if [ -r "/boot/config-$(uname -r)" ]; then
+    kernel_config="/boot/config-$(uname -r)"
+  elif [ -r /proc/config.gz ] && has_cmd zgrep; then
+    zgrep -Eq '^CONFIG_TCP_CONG_BBR=(y|m)$' /proc/config.gz
+    return $?
+  fi
+  if [ -n "$kernel_config" ] && grep -Eq '^CONFIG_TCP_CONG_BBR=(y|m)$' "$kernel_config"; then
+    return 0
+  fi
+  find "/lib/modules/$(uname -r)" -type f -name 'tcp_bbr.ko*' -print -quit 2>/dev/null | grep -q .
+}
+
 enable_bbr() {
   local config_file="/etc/sysctl.d/90-bbr.conf" config_backup=""
   blue "$(m 'Enabling BBR if supported...' 'Enabling BBR if supported...')"
@@ -950,7 +1163,7 @@ EOF2
   if ! sysctl -p /etc/sysctl.d/90-bbr.conf >/dev/null; then
     red "$(m 'Failed to apply BBR sysctl settings. Restoring the previous configuration.' 'Failed to apply BBR sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
-    if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
+    restore_sysctl_file "$config_file"
     return 1
   fi
   sysctl net.ipv4.tcp_congestion_control || true
@@ -959,6 +1172,9 @@ EOF2
 
 apply_proxy_sysctl() {
   local config_file="/etc/sysctl.d/99-proxy-tuning.conf" config_backup=""
+  yellow "$(m 'Advanced proxy sysctl tuning changes global TCP behavior and is not part of the low-risk baseline.' 'Advanced proxy sysctl tuning changes global TCP behavior and is not part of the low-risk baseline.')"
+  status_info "$(m 'Use this only for a measured high-concurrency workload and keep benchmark/rollback data.' 'Use this only for a measured high-concurrency workload and keep benchmark/rollback data.')"
+  confirm_yes "$(m 'Apply advanced global proxy sysctl tuning?' 'Apply advanced global proxy sysctl tuning?')" || return 0
   backup_path "$config_file" >/dev/null || return 1
   config_backup="$BACKUP_LAST_PATH"
   cat > "$config_file" <<'EOF2' || return 1
@@ -985,13 +1201,16 @@ EOF2
   if ! sysctl -p /etc/sysctl.d/99-proxy-tuning.conf >/dev/null; then
     red "$(m 'Failed to apply proxy sysctl settings. Restoring the previous configuration.' 'Failed to apply proxy sysctl settings. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
-    if [ -e "$config_file" ]; then sysctl -p "$config_file" >/dev/null 2>&1 || true; fi
+    restore_sysctl_file "$config_file"
     return 1
   fi
   green "$(m 'Proxy sysctl tuning applied.' 'Proxy sysctl tuning applied.')"
 }
 
 raise_nofile_limits() {
+  yellow "$(m 'Global nofile tuning affects all users and default systemd service limits.' 'Global nofile tuning affects all users and default systemd service limits.')"
+  status_info "$(m 'Prefer a per-service LimitNOFILE override when only one daemon needs a higher limit.' 'Prefer a per-service LimitNOFILE override when only one daemon needs a higher limit.')"
+  confirm_yes "$(m 'Raise global nofile defaults?' 'Raise global nofile defaults?')" || return 0
   backup_path /etc/security/limits.d/99-proxy-limits.conf >/dev/null || return 1
   cat > /etc/security/limits.d/99-proxy-limits.conf <<'EOF2' || return 1
 * soft nofile 1048576
@@ -1049,6 +1268,84 @@ nonroot_password_hash_count() {
 
 ssh_effective() {
   sshd -T 2>/dev/null | grep -E '^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|pubkeyauthentication|authenticationmethods|permitemptypasswords|usepam|maxauthtries|maxsessions|maxstartups|logingracetime|x11forwarding|allowtcpforwarding|allowagentforwarding|gatewayports|permittunnel|allowusers|denyusers) ' || true
+}
+
+ssh_effective_value_from_text() {
+  local text="$1" key="$2"
+  awk -v key="$key" '
+    $1 == key {
+      $1 = ""
+      sub(/^[[:space:]]+/, "")
+      print
+      exit
+    }
+  ' <<< "$text"
+}
+
+ssh_effective_expect() {
+  local text="$1" key="$2" expected="$3" actual
+  actual="$(ssh_effective_value_from_text "$text" "$key")"
+  if [ "$actual" != "$expected" ]; then
+    status_bad "Effective SSH mismatch: $key expected '$expected', got '${actual:-missing}'."
+    return 1
+  fi
+}
+
+ssh_verify_hardening_effective() {
+  local port="$1" password_policy="$2" permit_root="$3" strict_forwarding="$4" allow_tcp="$5" allow_user="${6:-}"
+  local output effective_root failures=0
+  if ! output="$(sshd -T 2>/dev/null)"; then
+    status_bad "Unable to read effective SSH configuration with sshd -T."
+    return 1
+  fi
+
+  if ! awk -v expected="$port" '$1 == "port" && $2 == expected { found=1 } END { exit(found ? 0 : 1) }' <<< "$output"; then
+    status_bad "Effective SSH mismatch: port $port is not active."
+    failures=$((failures + 1))
+  fi
+  ssh_effective_expect "$output" pubkeyauthentication yes || failures=$((failures + 1))
+
+  effective_root="$(ssh_effective_value_from_text "$output" permitrootlogin)"
+  if [ "$permit_root" = "without-password" ]; then
+    if [ "$effective_root" != "without-password" ] && [ "$effective_root" != "prohibit-password" ]; then
+      status_bad "Effective SSH mismatch: permitrootlogin expected password-disabled root login, got '${effective_root:-missing}'."
+      failures=$((failures + 1))
+    fi
+  elif [ "$effective_root" != "$permit_root" ]; then
+    status_bad "Effective SSH mismatch: permitrootlogin expected '$permit_root', got '${effective_root:-missing}'."
+    failures=$((failures + 1))
+  fi
+
+  ssh_effective_expect "$output" maxauthtries 3 || failures=$((failures + 1))
+  ssh_effective_expect "$output" maxsessions 3 || failures=$((failures + 1))
+  ssh_effective_expect "$output" maxstartups 10:30:60 || failures=$((failures + 1))
+  ssh_effective_expect "$output" logingracetime 30 || failures=$((failures + 1))
+  ssh_effective_expect "$output" permitemptypasswords no || failures=$((failures + 1))
+  ssh_effective_expect "$output" usepam yes || failures=$((failures + 1))
+
+  case "$password_policy" in
+    no)
+      ssh_effective_expect "$output" passwordauthentication no || failures=$((failures + 1))
+      ssh_effective_expect "$output" kbdinteractiveauthentication no || failures=$((failures + 1))
+      ;;
+    yes)
+      ssh_effective_expect "$output" passwordauthentication yes || failures=$((failures + 1))
+      ;;
+  esac
+
+  if [ "$strict_forwarding" = "yes" ]; then
+    ssh_effective_expect "$output" x11forwarding no || failures=$((failures + 1))
+    ssh_effective_expect "$output" allowagentforwarding no || failures=$((failures + 1))
+    ssh_effective_expect "$output" gatewayports no || failures=$((failures + 1))
+    ssh_effective_expect "$output" permittunnel no || failures=$((failures + 1))
+    ssh_effective_expect "$output" allowstreamlocalforwarding no || failures=$((failures + 1))
+  fi
+  ssh_effective_expect "$output" allowtcpforwarding "$allow_tcp" || failures=$((failures + 1))
+  if [ -n "$allow_user" ]; then
+    ssh_effective_expect "$output" allowusers "$allow_user" || failures=$((failures + 1))
+  fi
+
+  [ "$failures" -eq 0 ]
 }
 
 ssh_audit() {
@@ -1188,6 +1485,18 @@ ssh_key_line_valid() {
   valid_ssh_public_key "$key"
 }
 
+ssh_path_secure_for_user() {
+  local path="$1" user="$2" owner_uid mode user_uid
+  [ -e "$path" ] || return 1
+  owner_uid="$(stat -c %u "$path" 2>/dev/null || true)"
+  mode="$(stat -c %a "$path" 2>/dev/null || true)"
+  user_uid="$(id -u "$user" 2>/dev/null || true)"
+  [[ "$owner_uid" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ && "$user_uid" =~ ^[0-9]+$ ]] || return 1
+  [ "$owner_uid" -eq 0 ] || [ "$owner_uid" -eq "$user_uid" ] || return 1
+  mode="${mode: -3}"
+  (( (8#$mode & 8#022) == 0 ))
+}
+
 user_has_authorized_key() {
   local user="$1" home auth line
   if [ "$user" = "root" ]; then
@@ -1197,13 +1506,16 @@ user_has_authorized_key() {
   fi
   [ -n "$home" ] && [ -r "$home/.ssh/authorized_keys" ] || return 1
   auth="$home/.ssh/authorized_keys"
+  ssh_path_secure_for_user "$home" "$user" || return 1
+  ssh_path_secure_for_user "$home/.ssh" "$user" || return 1
+  ssh_path_secure_for_user "$auth" "$user" || return 1
   while IFS= read -r line; do
     ssh_key_line_valid "$line" && return 0
   done < "$auth"
   return 1
 }
 
-ssh_require_key_login_ready() {
+ssh_key_login_ready() {
   local allow_users="$1" permit_root="${2:-prohibit-password}" token user found=0
   if [ -n "$allow_users" ]; then
     for token in $allow_users; do
@@ -1230,9 +1542,14 @@ ssh_require_key_login_ready() {
       done < <(interactive_users)
     fi
   fi
-  [ "$found" -eq 1 ] && return 0
-  red "$(m 'Refusing to disable SSH password login: no usable authorized_keys entry was found.' 'Refusing to disable SSH password login: no usable authorized_keys entry was found.')"
-  status_info "$(m 'Install a public key first, or keep PasswordAuthentication as keep until key login is tested.' 'Install a public key first, or keep PasswordAuthentication as keep until key login is tested.')"
+  [ "$found" -eq 1 ]
+}
+
+ssh_require_key_login_ready() {
+  local allow_users="$1" permit_root="${2:-prohibit-password}"
+  ssh_key_login_ready "$allow_users" "$permit_root" && return 0
+  red "$(m 'Refusing SSH authentication hardening: no usable authorized_keys entry was found for an account that remains allowed.' 'Refusing SSH authentication hardening: no usable authorized_keys entry was found for an account that remains allowed.')"
+  status_info "$(m 'Install and test a public key first. The tool will not rely on an unverified password path after restricting root or password login.' 'Install and test a public key first. The tool will not rely on an unverified password path after restricting root or password login.')"
   return 1
 }
 
@@ -1281,7 +1598,7 @@ ssh_restore_hardening_backup() {
 }
 
 ssh_write_hardening() {
-  local port allow_user password_policy permit_root strict_forwarding allow_tcp fragment_backup=""
+  local port allow_user password_policy permit_root strict_forwarding allow_tcp fragment_backup="" fragment_tmp=""
   port="$(input_default "$(m 'New SSH port' 'New SSH port')" "$(current_ssh_port_guess)")"
   valid_port "$port" || { red "$(m 'Invalid SSH port. Use 1-65535.' 'Invalid SSH port. Use 1-65535.')"; return 1; }
   allow_user="$(input_default "$(m 'AllowUsers value, empty means do not set' 'AllowUsers value, empty means do not set')" "")"
@@ -1295,18 +1612,23 @@ ssh_write_hardening() {
   valid_permit_root_login "$permit_root" || { red "$(m 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.' 'Invalid PermitRootLogin policy. Use yes, prohibit-password, forced-commands-only, no, or without-password.')"; return 1; }
   strict_forwarding="$(input_yes_no "$(m 'Disable Agent/X11/Tunnel/Gateway forwarding?' 'Disable Agent/X11/Tunnel/Gateway forwarding?')" "yes")" || return 1
   allow_tcp="$(input_yes_no "$(m 'Allow TCP forwarding for ssh -L/-R/-D?' 'Allow TCP forwarding for ssh -L/-R/-D?')" "yes")" || return 1
-  if [ "$password_policy" = "no" ]; then
+  if [ "$password_policy" = "no" ] || [ "$permit_root" != "yes" ]; then
     ssh_require_key_login_ready "$allow_user" "$permit_root" || return 1
   fi
 
-  backup_path /etc/ssh/sshd_config >/dev/null
-  mkdir -p /etc/ssh/sshd_config.d
+  backup_path /etc/ssh/sshd_config >/dev/null || { red "Failed to back up /etc/ssh/sshd_config."; return 1; }
+  mkdir -p /etc/ssh/sshd_config.d || { red "Failed to create /etc/ssh/sshd_config.d."; return 1; }
   if [ -e "$SSH_HARDENING_FRAGMENT" ]; then
     backup_path "$SSH_HARDENING_FRAGMENT" >/dev/null || { red "$(m 'Failed to back up the existing SSH hardening fragment.' 'Failed to back up the existing SSH hardening fragment.')"; return 1; }
     fragment_backup="$BACKUP_LAST_PATH"
   fi
 
-  cat > "$SSH_HARDENING_FRAGMENT" <<EOF2
+  fragment_tmp="$(mktemp "/etc/ssh/sshd_config.d/.00-vps-init-hardening.conf.XXXXXX")" || {
+    red "Failed to create an SSH hardening staging file."
+    return 1
+  }
+  {
+    cat <<EOF2
 # Managed by $SCRIPT_NAME $TOOL_VERSION
 Port $port
 PubkeyAuthentication yes
@@ -1318,30 +1640,49 @@ LoginGraceTime 30
 PermitEmptyPasswords no
 UsePAM yes
 EOF2
-  if [ "$password_policy" = "no" ]; then
-    cat >> "$SSH_HARDENING_FRAGMENT" <<'EOF2'
+    if [ "$password_policy" = "no" ]; then
+      cat <<'EOF2'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 EOF2
-  elif [ "$password_policy" = "yes" ]; then
-    printf 'PasswordAuthentication %s\n' "$password_policy" >> "$SSH_HARDENING_FRAGMENT"
-  fi
-  if [ "$strict_forwarding" = "yes" ]; then
-    cat >> "$SSH_HARDENING_FRAGMENT" <<'EOF2'
+    elif [ "$password_policy" = "yes" ]; then
+      printf 'PasswordAuthentication %s\n' "$password_policy"
+    fi
+    if [ "$strict_forwarding" = "yes" ]; then
+      cat <<'EOF2'
 X11Forwarding no
 AllowAgentForwarding no
 GatewayPorts no
 PermitTunnel no
 AllowStreamLocalForwarding no
 EOF2
+    fi
+    printf 'AllowTcpForwarding %s\n' "$allow_tcp"
+    [ -n "$allow_user" ] && printf 'AllowUsers %s\n' "$allow_user"
+  } > "$fragment_tmp" || {
+    cleanup_files "$fragment_tmp"
+    red "Failed to write the SSH hardening staging file."
+    return 1
+  }
+  chmod 600 "$fragment_tmp" || { cleanup_files "$fragment_tmp"; red "Failed to secure the SSH hardening staging file."; return 1; }
+  if ! mv -f -- "$fragment_tmp" "$SSH_HARDENING_FRAGMENT"; then
+    cleanup_files "$fragment_tmp"
+    red "Failed to install the SSH hardening fragment."
+    return 1
   fi
-  if [ "$allow_tcp" = "yes" ]; then echo "AllowTcpForwarding yes" >> "$SSH_HARDENING_FRAGMENT"; else echo "AllowTcpForwarding no" >> "$SSH_HARDENING_FRAGMENT"; fi
-  [ -n "$allow_user" ] && echo "AllowUsers $allow_user" >> "$SSH_HARDENING_FRAGMENT"
+  fragment_tmp=""
 
   if ! sshd -t; then
     red "$(m 'sshd config test failed. Restoring the previous fragment.' 'sshd config test failed. Restoring the previous fragment.')"
     ssh_restore_hardening_backup "$fragment_backup" || red "$(m 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.' 'Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually.')"
+    return 1
+  fi
+
+  if ! ssh_verify_hardening_effective "$port" "$password_policy" "$permit_root" "$strict_forwarding" "$allow_tcp" "$allow_user"; then
+    red "SSH hardening did not become effective. Restoring the previous fragment."
+    status_info "Check that /etc/ssh/sshd_config includes /etc/ssh/sshd_config.d/*.conf before global SSH options."
+    ssh_restore_hardening_backup "$fragment_backup" || red "Failed to restore the previous SSH configuration; keep the current SSH session open and inspect sshd manually."
     return 1
   fi
 
@@ -1398,7 +1739,7 @@ ufw_warn_default_ssh_port() {
   if printf ' %s ' "$ssh_ports" | grep -q ' 22 '; then
     yellow "$(m 'SSH appears to include the default port 22.' 'SSH appears to include the default port 22.')"
     status_info "$(m 'Before enabling UFW, consider using the SSH menu to move SSH to a custom port, install a public key, and use key-only login.' 'Before enabling UFW, consider using the SSH menu to move SSH to a custom port, install a public key, and use key-only login.')"
-    status_info "$(m 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.' 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.') before UFW changes to avoid locking you out.')"
+    status_info "$(m 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.' 'This tool will still allow the current SSH port(s) before UFW changes to avoid locking you out.')"
   fi
 }
 
@@ -1411,7 +1752,7 @@ ufw_ensure_ssh_access() {
     valid_port "$p" || { red "$(m "Invalid detected SSH port: $p" "Invalid detected SSH port: $p")"; return 1; }
     ufw allow "$p/tcp" comment "SSH" || return 1
   done
-  status_ok "$(m "Allowed SSH port(s): $ssh_ports/tcp." "Allowed SSH port(s): $ssh_ports/tcp."): $ssh_ports/tcp.")"
+  status_ok "$(m "Allowed SSH port(s): $ssh_ports/tcp." "Allowed SSH port(s): $ssh_ports/tcp.")"
 }
 
 ufw_audit() {
@@ -1425,7 +1766,7 @@ ufw_audit() {
     ufw_state="$(ufw status 2>/dev/null | awk 'NR==1 {print $2}')"
     kv "UFW status" "${ufw_state:-unknown}"
     if ufw status | grep -q inactive; then
-      status_warn "$(m "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling." "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling.") $ssh_ports before enabling.")"
+      status_warn "$(m "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling." "UFW is inactive. Safe-init can allow SSH port(s) $ssh_ports before enabling.")"
     else
       status_ok "$(m 'UFW is active.' 'UFW is active.')"
     fi
@@ -1448,7 +1789,7 @@ ufw_init_safe() {
   ufw_install
   local ssh_ports
   ssh_ports="$(current_ssh_ports)"
-  yellow "$(m "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW." "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW."): $ssh_ports, then enable UFW.")"
+  yellow "$(m "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW." "Will set: default deny incoming, allow outgoing, allow SSH port(s): $ssh_ports, then enable UFW.")"
   ufw_warn_default_ssh_port "$ssh_ports"
   confirm_yes "$(m 'Enable UFW safely?' 'Enable UFW safely?')" || return 0
   ufw_ensure_ssh_access || return 1
@@ -1494,15 +1835,34 @@ ufw_limit_ssh() {
 cf_fetch_ranges() {
   local v4_tmp v6_tmp
   apt_install curl ca-certificates
-  mkdir -p /var/lib/vps-init
-  v4_tmp="$(mktemp /var/lib/vps-init/cloudflare-ips-v4.txt.XXXXXX)" || return 1
-  v6_tmp="$(mktemp /var/lib/vps-init/cloudflare-ips-v6.txt.XXXXXX)" || { cleanup_files "$v4_tmp"; return 1; }
+  mkdir -p "$(dirname "$UFW_CF_IPV4_FILE")" "$(dirname "$UFW_CF_IPV6_FILE")" || return 1
+  v4_tmp="$(mktemp "$(dirname "$UFW_CF_IPV4_FILE")/cloudflare-ips-v4.txt.XXXXXX")" || return 1
+  v6_tmp="$(mktemp "$(dirname "$UFW_CF_IPV6_FILE")/cloudflare-ips-v6.txt.XXXXXX")" || { cleanup_files "$v4_tmp"; return 1; }
   if ! curl -fsSL "$CF_IPV4_URL" -o "$v4_tmp"; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
   if ! curl -fsSL "$CF_IPV6_URL" -o "$v6_tmp"; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
-  grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/' "$v4_tmp" || { red "Invalid Cloudflare IPv4 list."; cleanup_files "$v4_tmp" "$v6_tmp"; return 1; }
-  grep -Eq ':' "$v6_tmp" || { red "Invalid Cloudflare IPv6 list."; cleanup_files "$v4_tmp" "$v6_tmp"; return 1; }
-  if ! mv "$v4_tmp" /var/lib/vps-init/cloudflare-ips-v4.txt; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
-  if ! mv "$v6_tmp" /var/lib/vps-init/cloudflare-ips-v6.txt; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
+  sed -i 's/\r$//' "$v4_tmp" "$v6_tmp" || { cleanup_files "$v4_tmp" "$v6_tmp"; return 1; }
+  validate_cloudflare_range_file "$v4_tmp" 4 || { cleanup_files "$v4_tmp" "$v6_tmp"; return 1; }
+  validate_cloudflare_range_file "$v6_tmp" 6 || { cleanup_files "$v4_tmp" "$v6_tmp"; return 1; }
+  if ! mv "$v4_tmp" "$UFW_CF_IPV4_FILE"; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
+  if ! mv "$v6_tmp" "$UFW_CF_IPV6_FILE"; then cleanup_files "$v4_tmp" "$v6_tmp"; return 1; fi
+}
+
+validate_cloudflare_range_file() {
+  local file="$1" family="$2" cidr count=0
+  [ -r "$file" ] || { red "Cloudflare IPv${family} list is not readable."; return 1; }
+  while IFS= read -r cidr || [ -n "$cidr" ]; do
+    cidr="${cidr%$'\r'}"
+    [ -n "$cidr" ] || continue
+    [[ "$cidr" == */* ]] || { red "Cloudflare IPv${family} entry is not a CIDR: $cidr"; return 1; }
+    valid_ip_or_cidr "$cidr" || { red "Invalid Cloudflare IPv${family} CIDR: $cidr"; return 1; }
+    if { [ "$family" = "4" ] && [[ "$cidr" == *:* ]]; } || { [ "$family" = "6" ] && [[ "$cidr" != *:* ]]; }; then
+      red "Cloudflare IPv${family} list contains the wrong address family: $cidr"
+      return 1
+    fi
+    count=$((count + 1))
+    [ "$count" -le 100 ] || { red "Cloudflare IPv${family} list unexpectedly exceeds 100 ranges."; return 1; }
+  done < "$file"
+  [ "$count" -gt 0 ] || { red "Cloudflare IPv${family} list is empty."; return 1; }
 }
 
 ufw_parse_cloudflare_ports() {
@@ -1517,7 +1877,7 @@ ufw_parse_cloudflare_ports() {
 ufw_build_cloudflare_desired_rules() {
   local output="$1" f cidr p
   : > "$output"
-  for f in /var/lib/vps-init/cloudflare-ips-v4.txt /var/lib/vps-init/cloudflare-ips-v6.txt; do
+  for f in "$UFW_CF_IPV4_FILE" "$UFW_CF_IPV6_FILE"; do
     while read -r cidr; do
       [ -n "$cidr" ] || continue
       for p in "${port_arr[@]}"; do
@@ -1537,6 +1897,35 @@ set_diff_file() {
 ufw_delete_rule_exact() {
   local cidr="$1" port="$2"
   ufw --force delete allow proto tcp from "$cidr" to any port "$port" comment "cloudflare-$port" >/dev/null 2>&1
+}
+
+ufw_cf_state_commit() {
+  local source="$1" state_tmp
+  mkdir -p "$(dirname "$UFW_CF_STATE_FILE")" || return 1
+  state_tmp="$(mktemp "$(dirname "$UFW_CF_STATE_FILE")/.cloudflare-ufw-state.XXXXXX")" || return 1
+  if ! sort -u "$source" > "$state_tmp" || ! install -m 0644 "$state_tmp" "$UFW_CF_STATE_FILE"; then
+    cleanup_files "$state_tmp"
+    return 1
+  fi
+  cleanup_files "$state_tmp"
+}
+
+ufw_cf_state_add() {
+  local state="$1" cidr="$2" port="$3"
+  printf '%s\t%s\n' "$cidr" "$port" >> "$state" || return 1
+  sort -u "$state" -o "$state" || return 1
+  ufw_cf_state_commit "$state"
+}
+
+ufw_cf_state_remove() {
+  local state="$1" cidr="$2" port="$3" filtered
+  filtered="$(mktemp)" || return 1
+  if ! awk -F '\t' -v cidr="$cidr" -v port="$port" '!(NF >= 2 && $1 == cidr && $2 == port)' "$state" > "$filtered"; then
+    cleanup_files "$filtered"
+    return 1
+  fi
+  mv "$filtered" "$state" || { cleanup_files "$filtered"; return 1; }
+  ufw_cf_state_commit "$state"
 }
 
 ufw_cf_lock_acquire() {
@@ -1568,7 +1957,7 @@ ufw_cf_sync_cleanup() {
 
 ufw_sync_cloudflare_web() {
   ufw_install
-  local ports desired="" current="" adds="" deletes="" state_tmp="" add_count delete_count cidr p rule_error=0
+  local ports desired="" current="" adds="" deletes="" add_count delete_count cidr p rule_error=0
   local -a port_arr
   if [ -n "${UFW_CF_PORTS:-}" ]; then
     ports="$UFW_CF_PORTS"
@@ -1578,17 +1967,19 @@ ufw_sync_cloudflare_web() {
   ufw_parse_cloudflare_ports "$ports" || return 1
   yellow "$(m 'This incrementally syncs Cloudflare allow rules managed by this tool.' 'This incrementally syncs Cloudflare allow rules managed by this tool.')"
   yellow "$(m 'It will not remove broad manual 80/443 rules; review those after verification.' 'It will not remove broad manual 80/443 rules; review those after verification.')"
+  if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+    yellow "$(m 'UFW is inactive. Synced rules will not protect the origin until safe initialization enables UFW.' 'UFW is inactive. Synced rules will not protect the origin until safe initialization enables UFW.')"
+  fi
   confirm_yes "$(m 'Continue Cloudflare UFW sync?' 'Continue Cloudflare UFW sync?')" || return 0
 
   ufw_cf_lock_acquire || return 1
-  ufw_ensure_ssh_access || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
-  cf_fetch_ranges || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
+  ufw_ensure_ssh_access || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
+  cf_fetch_ranges || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
 
-  desired="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
-  current="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
-  adds="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
-  deletes="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
-  state_tmp="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"; return 1; }
+  desired="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
+  current="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
+  adds="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
+  deletes="$(mktemp)" || { ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"; return 1; }
 
   ufw_build_cloudflare_desired_rules "$desired"
   if [ -f "$UFW_CF_STATE_FILE" ]; then
@@ -1610,9 +2001,14 @@ ufw_sync_cloudflare_web() {
       rule_error=1
       break
     fi
+    if ! ufw_cf_state_add "$current" "$cidr" "$p"; then
+      red "$(m 'Cloudflare UFW rule was added, but managed progress could not be saved.' 'Cloudflare UFW rule was added, but managed progress could not be saved.')"
+      rule_error=1
+      break
+    fi
   done < "$adds"
   if [ "$rule_error" -ne 0 ]; then
-    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
+    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"
     return 1
   fi
 
@@ -1623,23 +2019,23 @@ ufw_sync_cloudflare_web() {
       rule_error=1
       break
     fi
+    if ! ufw_cf_state_remove "$current" "$cidr" "$p"; then
+      red "$(m 'Cloudflare UFW stale rule was deleted, but managed progress could not be saved.' 'Cloudflare UFW stale rule was deleted, but managed progress could not be saved.')"
+      rule_error=1
+      break
+    fi
   done < "$deletes"
   if [ "$rule_error" -ne 0 ]; then
-    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
+    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"
     return 1
   fi
 
-  mkdir -p "$(dirname "$UFW_CF_STATE_FILE")"
-  if ! cp "$desired" "$state_tmp"; then
-    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
-    return 1
-  fi
-  if ! install -m 0644 "$state_tmp" "$UFW_CF_STATE_FILE"; then
-    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
+  if ! ufw_cf_state_commit "$current"; then
+    ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"
     return 1
   fi
 
-  ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes" "$state_tmp"
+  ufw_cf_sync_cleanup "$desired" "$current" "$adds" "$deletes"
   ufw status numbered || true
   green "$(m 'Cloudflare UFW sync complete.' 'Cloudflare UFW sync complete.')"
 }
@@ -1649,8 +2045,10 @@ ufw_allow_cloudflare_web() {
 }
 
 ufw_reset_safe() {
+  ufw_install
   confirm_yes "$(m 'Reset ALL UFW rules?' 'Reset ALL UFW rules?')" || return 0
-  ufw --force reset
+  ufw --force reset || return 1
+  rm -f -- "$UFW_CF_STATE_FILE"
   green "$(m 'UFW reset.' 'UFW reset.')"
 }
 
@@ -1741,7 +2139,7 @@ EOF2
   if ! systemctl enable --now fail2ban || ! systemctl restart fail2ban; then
     red "$(m 'Fail2ban service activation failed. Restoring the previous jail.' 'Fail2ban service activation failed. Restoring the previous jail.')"
     if [ -n "$jail_backup" ]; then cp -a "$jail_backup" "$jail_file"; else rm -f "$jail_file"; fi
-    systemctl restart fail2ban 2>/dev/null || true
+    systemctl restart fail2ban 2>/dev/null || status_warn "$(m 'Failed to restart fail2ban after restoring jail. Check fail2ban manually.' 'Failed to restart fail2ban after restoring jail. Check fail2ban manually.')"
     return 1
   fi
   fail2ban_audit
@@ -1841,7 +2239,7 @@ dns_restore_resolved_backup() {
   else
     rm -f "$config_file"
   fi
-  systemctl restart systemd-resolved 2>/dev/null || true
+  systemctl restart systemd-resolved 2>/dev/null || status_warn "$(m 'Failed to restart systemd-resolved after restoring backup. Check DNS manually.' 'Failed to restart systemd-resolved after restoring backup. Check DNS manually.')"
 }
 
 dns_apply_resolved() {
@@ -1938,9 +2336,9 @@ logs_limit_journald() {
   require_systemd || return 1
   local system_max runtime_max retention
   local config_file="/etc/systemd/journald.conf.d/99-vps-init-size-limit.conf" config_backup=""
-  system_max="$(input_default "SystemMaxUse" "200M")"
-  runtime_max="$(input_default "RuntimeMaxUse" "100M")"
-  retention="$(input_default "MaxRetentionSec" "7day")"
+  system_max="${1:-$(input_default "SystemMaxUse" "200M")}"
+  runtime_max="${2:-$(input_default "RuntimeMaxUse" "100M")}"
+  retention="${3:-$(input_default "MaxRetentionSec" "7day")}"
   valid_systemd_size "$system_max" || { red "$(m 'Invalid SystemMaxUse. Use values such as 200M or 1G.' 'Invalid SystemMaxUse. Use values such as 200M or 1G.')"; return 1; }
   valid_systemd_size "$runtime_max" || { red "$(m 'Invalid RuntimeMaxUse. Use values such as 100M or 1G.' 'Invalid RuntimeMaxUse. Use values such as 100M or 1G.')"; return 1; }
   valid_systemd_timespan "$retention" || { red "$(m 'Invalid MaxRetentionSec. Use values such as 7day or 24h.' 'Invalid MaxRetentionSec. Use values such as 7day or 24h.')"; return 1; }
@@ -1957,7 +2355,7 @@ EOF2
   if ! systemctl restart systemd-journald; then
     red "$(m 'Failed to restart systemd-journald. Restoring the previous configuration.' 'Failed to restart systemd-journald. Restoring the previous configuration.')"
     restore_managed_file "$config_file" "$config_backup"
-    systemctl restart systemd-journald 2>/dev/null || true
+    systemctl restart systemd-journald 2>/dev/null || status_warn "$(m 'Failed to restart systemd-journald after restoring backup. Check journald manually.' 'Failed to restart systemd-journald after restoring backup. Check journald manually.')"
     return 1
   fi
   journalctl --disk-usage || true
@@ -1992,6 +2390,440 @@ logs_menu() {
   done
 }
 
+# ---------- automatic security updates ----------
+security_updates_audit() {
+  section "$(m 'Automatic security updates audit' 'Automatic security updates audit')"
+  local dump="" update_lists="unset" unattended="unset" auto_reboot="false" package_state="not-installed"
+  local daily_enabled="unknown" upgrade_enabled="unknown" daily_active="unknown" upgrade_active="unknown"
+
+  if ! has_cmd apt-config; then
+    status_warn "$(m 'apt-config is unavailable; automatic security updates are supported only on Debian/Ubuntu.' 'apt-config is unavailable; automatic security updates are supported only on Debian/Ubuntu.')"
+    return 0
+  fi
+  if dpkg-query -W -f='${Status}' unattended-upgrades 2>/dev/null | grep -q 'install ok installed'; then
+    package_state="installed"
+  fi
+  if dump="$(apt-config dump 2>/dev/null)"; then
+    update_lists="$(apt_config_value_from_text "$dump" 'APT::Periodic::Update-Package-Lists')"
+    unattended="$(apt_config_value_from_text "$dump" 'APT::Periodic::Unattended-Upgrade')"
+    auto_reboot="$(apt_config_value_from_text "$dump" 'Unattended-Upgrade::Automatic-Reboot')"
+  else
+    status_warn "$(m 'Unable to read the effective APT configuration.' 'Unable to read the effective APT configuration.')"
+  fi
+  update_lists="${update_lists:-unset}"
+  unattended="${unattended:-unset}"
+  auto_reboot="${auto_reboot:-false}"
+
+  kv "Package" "$package_state"
+  kv "Update-Package-Lists" "$update_lists"
+  kv "Unattended-Upgrade" "$unattended"
+  kv "Automatic-Reboot" "$auto_reboot"
+  kv "Managed policy" "$([ -f "$AUTO_UPGRADES_CONFIG" ] && echo present || echo absent)"
+
+  if is_systemd; then
+    daily_enabled="$(systemctl is-enabled apt-daily.timer 2>/dev/null || true)"
+    upgrade_enabled="$(systemctl is-enabled apt-daily-upgrade.timer 2>/dev/null || true)"
+    daily_active="$(systemctl is-active apt-daily.timer 2>/dev/null || true)"
+    upgrade_active="$(systemctl is-active apt-daily-upgrade.timer 2>/dev/null || true)"
+    daily_enabled="${daily_enabled:-disabled}"
+    upgrade_enabled="${upgrade_enabled:-disabled}"
+    daily_active="${daily_active:-inactive}"
+    upgrade_active="${upgrade_active:-inactive}"
+    kv "apt-daily.timer" "$daily_enabled/$daily_active"
+    kv "apt-daily-upgrade.timer" "$upgrade_enabled/$upgrade_active"
+  else
+    status_info "$(m 'systemd timers are unavailable; APT may use cron instead.' 'systemd timers are unavailable; APT may use cron instead.')"
+  fi
+
+  if [ "$package_state" = "installed" ] && [ "$update_lists" = "1" ] && [ "$unattended" = "1" ]; then
+    status_ok "$(m 'Daily unattended security updates are enabled through the distro configuration.' 'Daily unattended security updates are enabled through the distro configuration.')"
+  else
+    status_warn "$(m 'Automatic security updates are not fully enabled.' 'Automatic security updates are not fully enabled.')"
+  fi
+  case "$auto_reboot" in
+    true|yes|1) status_warn "$(m 'Automatic reboot is enabled; review maintenance-window requirements.' 'Automatic reboot is enabled; review maintenance-window requirements.')" ;;
+    *) status_ok "$(m 'Automatic reboot is disabled.' 'Automatic reboot is disabled.')" ;;
+  esac
+  if [ -e /var/run/reboot-required ]; then
+    status_warn "$(m 'A reboot is currently required to finish installed updates.' 'A reboot is currently required to finish installed updates.')"
+  fi
+  if [ -d /var/log/unattended-upgrades ]; then
+    kv "Logs" "/var/log/unattended-upgrades"
+  fi
+}
+
+security_updates_policy_effective() {
+  local expected="$1" dump update_lists unattended auto_reboot
+  dump="$(apt-config dump 2>/dev/null)" || return 1
+  update_lists="$(apt_config_value_from_text "$dump" 'APT::Periodic::Update-Package-Lists')"
+  unattended="$(apt_config_value_from_text "$dump" 'APT::Periodic::Unattended-Upgrade')"
+  auto_reboot="$(apt_config_value_from_text "$dump" 'Unattended-Upgrade::Automatic-Reboot')"
+  if [ "$update_lists" != "$expected" ] || [ "$unattended" != "$expected" ] || [ "${auto_reboot:-false}" != "false" ]; then
+    status_bad "Effective automatic updates policy mismatch: update-lists=${update_lists:-unset}, unattended=${unattended:-unset}, automatic-reboot=${auto_reboot:-false}."
+    return 1
+  fi
+}
+
+security_updates_fully_enabled() {
+  has_cmd apt-config && has_cmd dpkg-query || return 1
+  dpkg-query -W -f='${Status}' unattended-upgrades 2>/dev/null | grep -q 'install ok installed' || return 1
+  security_updates_policy_effective 1 >/dev/null 2>&1 || return 1
+  if is_systemd; then
+    systemctl is-enabled --quiet apt-daily.timer 2>/dev/null || return 1
+    systemctl is-enabled --quiet apt-daily-upgrade.timer 2>/dev/null || return 1
+  fi
+}
+
+security_updates_write_policy() {
+  local enabled="$1" config_backup="" policy_tmp="" policy_dir=""
+  [ "$enabled" = "0" ] || [ "$enabled" = "1" ] || return 1
+  policy_dir="$(dirname "$AUTO_UPGRADES_CONFIG")"
+  mkdir -p "$policy_dir" || return 1
+  backup_path "$AUTO_UPGRADES_CONFIG" >/dev/null || return 1
+  config_backup="$BACKUP_LAST_PATH"
+  policy_tmp="$(mktemp "$policy_dir/.52-vps-init-auto-upgrades.XXXXXX")" || return 1
+  if ! cat > "$policy_tmp" <<EOF2
+// Managed by $SCRIPT_NAME $TOOL_VERSION
+// Distribution-provided Allowed-Origins/Origins-Pattern settings remain authoritative.
+APT::Periodic::Update-Package-Lists "$enabled";
+APT::Periodic::Unattended-Upgrade "$enabled";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF2
+  then
+    cleanup_files "$policy_tmp"
+    return 1
+  fi
+  chmod 644 "$policy_tmp" || { cleanup_files "$policy_tmp"; return 1; }
+  mv -f -- "$policy_tmp" "$AUTO_UPGRADES_CONFIG" || { cleanup_files "$policy_tmp"; return 1; }
+  if ! apt-config dump >/dev/null || ! security_updates_policy_effective "$enabled"; then
+    red "$(m 'APT configuration validation or effective policy check failed. Restoring the previous automatic updates policy.' 'APT configuration validation or effective policy check failed. Restoring the previous automatic updates policy.')"
+    restore_managed_file "$AUTO_UPGRADES_CONFIG" "$config_backup" || status_bad "$(m 'Failed to restore the previous automatic updates policy.' 'Failed to restore the previous automatic updates policy.')"
+    return 1
+  fi
+  if [ "$enabled" = "1" ]; then
+    if ! systemctl enable --now apt-daily.timer apt-daily-upgrade.timer; then
+      red "$(m 'Failed to enable the standard APT timers. Restoring the previous automatic updates policy.' 'Failed to enable the standard APT timers. Restoring the previous automatic updates policy.')"
+      restore_managed_file "$AUTO_UPGRADES_CONFIG" "$config_backup" || status_bad "$(m 'Failed to restore the previous automatic updates policy.' 'Failed to restore the previous automatic updates policy.')"
+      return 1
+    fi
+  fi
+}
+
+security_updates_enable() {
+  require_systemd || return 1
+  yellow "$(m 'This enables the distro unattended-upgrades policy and standard daily APT timers.' 'This enables the distro unattended-upgrades policy and standard daily APT timers.')"
+  status_info "$(m 'Automatic reboot stays disabled; third-party repositories are not added to allowed origins.' 'Automatic reboot stays disabled; third-party repositories are not added to allowed origins.')"
+  confirm_yes "$(m 'Enable daily automatic security updates?' 'Enable daily automatic security updates?')" || return 0
+  apt_install unattended-upgrades || return 1
+  security_updates_write_policy 1 || return 1
+  log_action "security-updates" "enabled automatic-reboot=false"
+  green "$(m 'Automatic security updates enabled without automatic reboot.' 'Automatic security updates enabled without automatic reboot.')"
+  security_updates_audit
+}
+
+security_updates_disable() {
+  yellow "$(m 'This disables periodic package-list refresh and unattended upgrades through the tool-managed policy.' 'This disables periodic package-list refresh and unattended upgrades through the tool-managed policy.')"
+  confirm_yes "$(m 'Disable automatic security updates?' 'Disable automatic security updates?')" || return 0
+  security_updates_write_policy 0 || return 1
+  log_action "security-updates" "disabled"
+  green "$(m 'Automatic security updates disabled by the managed policy; the package was not removed.' 'Automatic security updates disabled by the managed policy; the package was not removed.')"
+  security_updates_audit
+}
+
+security_updates_menu() {
+  while true; do
+    clear_screen
+    title "$(m 'Automatic Security Updates' 'Automatic Security Updates')"
+    echo "1) $(m 'Audit effective policy' 'Audit effective policy')"
+    echo "2) $(m 'Enable daily security updates (no automatic reboot)' 'Enable daily security updates (no automatic reboot)')"
+    echo "3) $(m 'Disable automatic updates through managed policy' 'Disable automatic updates through managed policy')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    case "$c" in
+      1) security_updates_audit; pause ;;
+      2) security_updates_enable; pause ;;
+      3) security_updates_disable; pause ;;
+      0) return ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
+    esac
+  done
+}
+
+# ---------- layered optimization ----------
+memory_profile_current() {
+  local swappiness="$1" config_file="/etc/sysctl.d/99-memory-tuning.conf"
+  [ "$(sysctl -n vm.swappiness 2>/dev/null || true)" = "$swappiness" ] || return 1
+  [ "$(sysctl -n vm.vfs_cache_pressure 2>/dev/null || true)" = "50" ] || return 1
+  [ -f "$config_file" ] || return 1
+  grep -Eq "^[[:space:]]*vm\.swappiness[[:space:]]*=[[:space:]]*$swappiness([[:space:]]*)$" "$config_file" || return 1
+  grep -Eq '^[[:space:]]*vm\.vfs_cache_pressure[[:space:]]*=[[:space:]]*50([[:space:]]*)$' "$config_file"
+}
+
+bbr_profile_current() {
+  [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" = "bbr" ] || return 1
+  [ "$(sysctl -n net.core.default_qdisc 2>/dev/null || true)" = "fq" ] || return 1
+  [ -f /etc/sysctl.d/90-bbr.conf ] || return 1
+  grep -Eq '^[[:space:]]*net\.ipv4\.tcp_congestion_control[[:space:]]*=[[:space:]]*bbr([[:space:]]*)$' /etc/sysctl.d/90-bbr.conf || return 1
+  grep -Eq '^[[:space:]]*net\.core\.default_qdisc[[:space:]]*=[[:space:]]*fq([[:space:]]*)$' /etc/sysctl.d/90-bbr.conf
+}
+
+journald_profile_current() {
+  local config_file="/etc/systemd/journald.conf.d/99-vps-init-size-limit.conf"
+  [ -f "$config_file" ] || return 1
+  grep -Eq '^[[:space:]]*SystemMaxUse[[:space:]]*=[[:space:]]*200M([[:space:]]*)$' "$config_file" || return 1
+  grep -Eq '^[[:space:]]*RuntimeMaxUse[[:space:]]*=[[:space:]]*100M([[:space:]]*)$' "$config_file" || return 1
+  grep -Eq '^[[:space:]]*MaxRetentionSec[[:space:]]*=[[:space:]]*7day([[:space:]]*)$' "$config_file" || return 1
+  grep -Eq '^[[:space:]]*Compress[[:space:]]*=[[:space:]]*yes([[:space:]]*)$' "$config_file"
+}
+
+optimization_assessment() {
+  local support missing swappiness_rec effective="" ssh_ports="unknown" ssh_pass="unknown" ssh_root="unknown"
+  local swap_count zram_active disk_used ntp_state auto_pending=0 optional_pending=0
+  LANG_MODE="$(normalize_lang "$LANG_MODE")"
+  support="$(os_support_level)"
+  missing="$(basic_tools_missing)"
+  swappiness_rec="$(recommend_swappiness)"
+
+  title "$(m 'VPS Optimization Assessment' 'VPS Optimization Assessment')"
+  kv "Tool" "$SCRIPT_NAME $TOOL_VERSION"
+  kv "Host" "$(hostname 2>/dev/null || echo unknown)"
+  kv "Support level" "$support"
+  kv "Assessment mode" "read-only"
+
+  section "$(m 'Automatic optimization' 'Automatic optimization')"
+  status_info "$(m 'Safe, repeatable defaults with no application-specific assumptions.' 'Safe, repeatable defaults with no application-specific assumptions.')"
+  if [ -n "$missing" ]; then
+    status_warn "$(m "Essential tools missing: $missing" "Essential tools missing: $missing")"
+    auto_pending=$((auto_pending + 1))
+  else
+    status_ok "$(m 'Essential administration tools are available.' 'Essential administration tools are available.')"
+  fi
+
+  if bbr_profile_current; then
+    status_ok "$(m 'BBR with fq is active and persistent.' 'BBR with fq is active and persistent.')"
+  elif bbr_available_readonly; then
+    status_warn "$(m 'BBR is available but the managed BBR/fq profile is not fully active.' 'BBR is available but the managed BBR/fq profile is not fully active.')"
+    auto_pending=$((auto_pending + 1))
+  else
+    status_info "$(m 'BBR availability is not confirmed read-only; automatic mode will probe safely and skip if unsupported.' 'BBR availability is not confirmed read-only; automatic mode will probe safely and skip if unsupported.')"
+  fi
+
+  if memory_profile_current "$swappiness_rec"; then
+    status_ok "$(m "Managed memory profile is current: swappiness=$swappiness_rec, vfs_cache_pressure=50." "Managed memory profile is current: swappiness=$swappiness_rec, vfs_cache_pressure=50.")"
+  else
+    status_warn "$(m "Managed memory profile is pending: swappiness=$swappiness_rec, vfs_cache_pressure=50." "Managed memory profile is pending: swappiness=$swappiness_rec, vfs_cache_pressure=50.")"
+    auto_pending=$((auto_pending + 1))
+  fi
+
+  if is_systemd; then
+    if journald_profile_current; then
+      status_ok "$(m 'Managed journald retention profile is current.' 'Managed journald retention profile is current.')"
+    else
+      status_warn "$(m 'Managed journald limits are pending: 200M persistent, 100M runtime, 7-day retention.' 'Managed journald limits are pending: 200M persistent, 100M runtime, 7-day retention.')"
+      auto_pending=$((auto_pending + 1))
+    fi
+  else
+    status_info "$(m 'journald optimization is unavailable without systemd and will be skipped.' 'journald optimization is unavailable without systemd and will be skipped.')"
+  fi
+
+  if [ "$support" != "full" ]; then
+    status_warn "$(m 'Automatic changes are disabled on this OS; the assessment remains available.' 'Automatic changes are disabled on this OS; the assessment remains available.')"
+  fi
+
+  section "$(m 'Optional optimization' 'Optional optimization')"
+  status_info "$(m 'These items require an access, workload, provider, or maintenance decision.' 'These items require an access, workload, provider, or maintenance decision.')"
+
+  if has_cmd sshd; then
+    effective="$(sshd -T 2>/dev/null || true)"
+    if [ -n "$effective" ]; then
+      ssh_ports="$(awk '/^port / {print $2}' <<< "$effective" | sort -nu | paste -sd' ' -)"
+      ssh_pass="$(awk '/^passwordauthentication / {print $2; exit}' <<< "$effective")"
+      ssh_root="$(awk '/^permitrootlogin / {print $2; exit}' <<< "$effective")"
+      if grep -qw 22 <<< "$ssh_ports"; then
+        status_warn "$(m "SSH still includes port 22; review key login and hardening before enabling UFW. PasswordAuthentication=$ssh_pass, PermitRootLogin=$ssh_root." "SSH still includes port 22; review key login and hardening before enabling UFW. PasswordAuthentication=$ssh_pass, PermitRootLogin=$ssh_root.")"
+        optional_pending=$((optional_pending + 1))
+      elif [ "$ssh_pass" = "yes" ] || [ "$ssh_root" = "yes" ]; then
+        status_warn "$(m "SSH uses port(s) ${ssh_ports:-unknown}, but authentication policy needs review. PasswordAuthentication=$ssh_pass, PermitRootLogin=$ssh_root." "SSH uses port(s) ${ssh_ports:-unknown}, but authentication policy needs review. PasswordAuthentication=$ssh_pass, PermitRootLogin=$ssh_root.")"
+        optional_pending=$((optional_pending + 1))
+      else
+        status_ok "$(m "SSH uses port(s) ${ssh_ports:-unknown}; no obvious password/root-login warning was found." "SSH uses port(s) ${ssh_ports:-unknown}; no obvious password/root-login warning was found.")"
+      fi
+    else
+      status_info "$(m 'sshd is installed, but effective settings require a privileged SSH audit.' 'sshd is installed, but effective settings require a privileged SSH audit.')"
+      optional_pending=$((optional_pending + 1))
+    fi
+  else
+    status_warn "$(m 'OpenSSH server was not detected; confirm how remote administration is provided.' 'OpenSSH server was not detected; confirm how remote administration is provided.')"
+    optional_pending=$((optional_pending + 1))
+  fi
+
+  if has_cmd ufw; then
+    if [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+      if ufw status 2>/dev/null | grep -q '^Status: active'; then
+        status_ok "$(m 'UFW is active; review allowed services and source restrictions.' 'UFW is active; review allowed services and source restrictions.')"
+      else
+        status_warn "$(m 'UFW is installed but inactive. Configure SSH first, then use safe initialization.' 'UFW is installed but inactive. Configure SSH first, then use safe initialization.')"
+        optional_pending=$((optional_pending + 1))
+      fi
+    else
+      status_info "$(m 'UFW is installed; run this assessment with sudo to inspect activation state.' 'UFW is installed; run this assessment with sudo to inspect activation state.')"
+    fi
+  else
+    status_warn "$(m 'UFW is not installed. Add it only after confirming the effective SSH port and access path.' 'UFW is not installed. Add it only after confirming the effective SSH port and access path.')"
+    optional_pending=$((optional_pending + 1))
+  fi
+
+  if is_systemd && has_cmd fail2ban-client && systemctl is-active --quiet fail2ban 2>/dev/null; then
+    status_ok "$(m 'Fail2ban is active; verify that the sshd jail follows the effective SSH port.' 'Fail2ban is active; verify that the sshd jail follows the effective SSH port.')"
+  else
+    status_warn "$(m 'Fail2ban is not confirmed active. It is useful when SSH remains internet-facing.' 'Fail2ban is not confirmed active. It is useful when SSH remains internet-facing.')"
+    optional_pending=$((optional_pending + 1))
+  fi
+
+  if security_updates_fully_enabled; then
+    status_ok "$(m 'Automatic distro security updates are enabled without automatic reboot.' 'Automatic distro security updates are enabled without automatic reboot.')"
+  else
+    status_warn "$(m 'Automatic security updates are not fully enabled; choose a maintenance policy before enabling them.' 'Automatic security updates are not fully enabled; choose a maintenance policy before enabling them.')"
+    optional_pending=$((optional_pending + 1))
+  fi
+
+  swap_count="$({ swapon --show --noheadings 2>/dev/null || true; } | wc -l | awk '{print $1}')"
+  zram_active="$(swapon --show --noheadings 2>/dev/null | awk '$1 ~ /zram/ {print $1}' | paste -sd, - || true)"
+  if [ "${swap_count:-0}" -eq 0 ]; then
+    status_warn "$(m "No swap is active. Review workload and disk endurance; suggested swapfile ceiling: $(recommend_swap_size), ZRAM: $(recommend_zram_size)." "No swap is active. Review workload and disk endurance; suggested swapfile ceiling: $(recommend_swap_size), ZRAM: $(recommend_zram_size).")"
+    optional_pending=$((optional_pending + 1))
+  else
+    status_ok "$(m "Swap is active; ZRAM devices: ${zram_active:-none}." "Swap is active; ZRAM devices: ${zram_active:-none}.")"
+  fi
+
+  status_info "$(m 'DNS changes, Cloudflare-only web rules, global nofile limits, and proxy sysctl tuning stay optional and workload-specific.' 'DNS changes, Cloudflare-only web rules, global nofile limits, and proxy sysctl tuning stay optional and workload-specific.')"
+
+  section "$(m 'Reference optimization' 'Reference optimization')"
+  status_info "$(m 'Observe these items and act only with provider or workload context.' 'Observe these items and act only with provider or workload context.')"
+  disk_used="$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
+  if [[ "$disk_used" =~ ^[0-9]+$ ]] && [ "$disk_used" -ge 85 ]; then
+    status_warn "$(m "Root filesystem usage is ${disk_used}%; investigate before package upgrades or swap allocation." "Root filesystem usage is ${disk_used}%; investigate before package upgrades or swap allocation.")"
+  else
+    status_ok "$(m "Root filesystem usage: ${disk_used:-unknown}%." "Root filesystem usage: ${disk_used:-unknown}%.")"
+  fi
+
+  ntp_state="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+  case "$ntp_state" in
+    yes) status_ok "$(m 'System clock reports NTP synchronized.' 'System clock reports NTP synchronized.')" ;;
+    no) status_warn "$(m 'System clock is not yet NTP synchronized; check the provider and time service.' 'System clock is not yet NTP synchronized; check the provider and time service.')" ;;
+    *) status_info "$(m 'NTP synchronization state is unavailable.' 'NTP synchronization state is unavailable.')" ;;
+  esac
+  if [ -e /var/run/reboot-required ]; then
+    status_warn "$(m 'A reboot is required to finish installed updates; schedule it after service checks.' 'A reboot is required to finish installed updates; schedule it after service checks.')"
+  else
+    status_ok "$(m 'No distro reboot-required marker is present.' 'No distro reboot-required marker is present.')"
+  fi
+  status_info "$(m 'Prefer per-service LimitNOFILE overrides, measured network tuning, provider snapshots, off-host backups, and external monitoring.' 'Prefer per-service LimitNOFILE overrides, measured network tuning, provider snapshots, off-host backups, and external monitoring.')"
+  status_info "$(m 'Cloud-init or the provider may own networking, DNS, hostname, and boot settings; verify ownership before editing them.' 'Cloud-init or the provider may own networking, DNS, hostname, and boot settings; verify ownership before editing them.')"
+
+  section "$(m 'Assessment summary' 'Assessment summary')"
+  kv "Automatic pending groups" "$auto_pending"
+  kv "Optional review groups" "$optional_pending"
+  if [ "$support" = "full" ]; then
+    status_info "$(m 'Apply only the automatic tier: sudo bash vps_init_tool.sh --optimize-auto --yes' 'Apply only the automatic tier: sudo bash vps_init_tool.sh --optimize-auto --yes')"
+    status_info "$(m 'Use the guided workflow: sudo bash vps_init_tool.sh, then choose Optimization assessment / guided setup.' 'Use the guided workflow: sudo bash vps_init_tool.sh, then choose Optimization assessment / guided setup.')"
+  else
+    status_warn "$(m 'This OS is assessment-only. Do not run automatic changes with this script.' 'This OS is assessment-only. Do not run automatic changes with this script.')"
+  fi
+  status_info "$(m 'Assessment completed without changing the system.' 'Assessment completed without changing the system.')"
+}
+
+apply_safe_automatic_optimizations() {
+  local failures=0 missing swappiness_rec
+  missing="$(basic_tools_missing)"
+  swappiness_rec="$(recommend_swappiness)"
+  if [ -n "$missing" ]; then
+    if ! install_essential_tools; then failures=$((failures + 1)); fi
+  else
+    status_ok "$(m 'Essential administration tools already present; skipped package installation.' 'Essential administration tools already present; skipped package installation.')"
+  fi
+  if bbr_profile_current; then
+    status_ok "$(m 'BBR/fq profile already current; skipped.' 'BBR/fq profile already current; skipped.')"
+  elif bbr_supported; then
+    if ! enable_bbr; then failures=$((failures + 1)); fi
+  else
+    status_info "$(m 'BBR is unsupported or unavailable; skipped without failure.' 'BBR is unsupported or unavailable; skipped without failure.')"
+  fi
+  if memory_profile_current "$swappiness_rec"; then
+    status_ok "$(m 'Memory profile already current; skipped.' 'Memory profile already current; skipped.')"
+  elif ! apply_memory_sysctl "$swappiness_rec" "50"; then
+    failures=$((failures + 1))
+  fi
+  if is_systemd; then
+    if journald_profile_current; then
+      status_ok "$(m 'journald profile already current; skipped.' 'journald profile already current; skipped.')"
+    elif ! logs_limit_journald "200M" "100M" "7day"; then
+      failures=$((failures + 1))
+    fi
+  else
+    status_info "$(m 'systemd is unavailable; journald profile skipped without failure.' 'systemd is unavailable; journald profile skipped without failure.')"
+  fi
+  [ "$failures" -eq 0 ] || return "$failures"
+}
+
+automatic_optimize() {
+  local mode="${1:-interactive}" failures=0
+  optimization_assessment
+  section "$(m 'Automatic optimization scope' 'Automatic optimization scope')"
+  yellow "$(m 'This applies only essential tools, supported BBR/fq, conservative VM memory values, and bounded journald retention.' 'This applies only essential tools, supported BBR/fq, conservative VM memory values, and bounded journald retention.')"
+  yellow "$(m 'It does NOT change SSH, UFW, Fail2ban, DNS, security-update policy, swap/ZRAM, global nofile limits, or advanced proxy sysctl values.' 'It does NOT change SSH, UFW, Fail2ban, DNS, security-update policy, swap/ZRAM, global nofile limits, or advanced proxy sysctl values.')"
+  if ! confirm_yes "$(m 'Apply the safe automatic optimization tier?' 'Apply the safe automatic optimization tier?')"; then
+    [ "$mode" = "cli" ] && return 2
+    return 0
+  fi
+  log_action "optimize-auto" "start mode=$mode"
+  if apply_safe_automatic_optimizations; then
+    failures=0
+  else
+    failures=$?
+    log_action "optimize-auto" "partial-failure mode=$mode failures=$failures"
+    red "$(m "Automatic optimization completed with $failures failed step(s)." "Automatic optimization completed with $failures failed step(s).")"
+    return 1
+  fi
+  log_action "optimize-auto" "complete mode=$mode"
+  green "$(m 'Safe automatic optimization completed.' 'Safe automatic optimization completed.')"
+  optimization_assessment
+}
+
+guided_optimization() {
+  automatic_optimize "guided" || true
+  while true; do
+    title "$(m 'Optional Optimization' 'Optional Optimization')"
+    status_info "$(m 'Recommended order: secure SSH access first, then firewall and Fail2ban.' 'Recommended order: secure SSH access first, then firewall and Fail2ban.')"
+    echo "1) $(m 'SSH audit / key setup / hardening' 'SSH audit / key setup / hardening')"
+    echo "2) $(m 'UFW safe initialization / Cloudflare rules' 'UFW safe initialization / Cloudflare rules')"
+    echo "3) Fail2ban"
+    echo "4) $(m 'Automatic security updates' 'Automatic security updates')"
+    echo "5) $(m 'Swap / ZRAM workload choices' 'Swap / ZRAM workload choices')"
+    echo "6) $(m 'DNS audit and testing' 'DNS audit and testing')"
+    echo "7) $(m 'Advanced measured tuning' 'Advanced measured tuning')"
+    echo "8) $(m 'Run optimization assessment again' 'Run optimization assessment again')"
+    echo "0) $(m 'Back' 'Back')"
+    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    case "$c" in
+      1) ssh_menu ;;
+      2) ufw_menu ;;
+      3) fail2ban_menu ;;
+      4) security_updates_menu ;;
+      5) memory_optimize_menu ;;
+      6) dns_menu ;;
+      7)
+        apply_proxy_sysctl
+        raise_nofile_limits
+        pause
+        ;;
+      8) optimization_assessment; pause ;;
+      0) return ;;
+      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
+    esac
+  done
+}
+
 audit_all() {
   clear_screen
   title "$(m 'Full Environment Audit' 'Full Environment Audit')"
@@ -2009,6 +2841,7 @@ audit_all() {
   fail2ban_audit || true
   dns_audit || true
   logs_audit || true
+  security_updates_audit || true
 
   section "$(m 'Summary' 'Summary')"
   status_info "$(m 'Audit mode is read-only. No settings were changed.' 'Audit mode is read-only. No settings were changed.')"
@@ -2017,23 +2850,14 @@ audit_all() {
 
 low_risk_baseline() {
   local mode="${1:-interactive}" failures=0
-  yellow "$(m 'Low-risk baseline includes: basic tools, BBR if supported, memory profile, proxy sysctl, nofile, journald limit.' 'Low-risk baseline includes: basic tools, BBR if supported, memory profile, proxy sysctl, nofile, journald limit.')"
-  yellow "$(m 'It does NOT change SSH, UFW, DNS, Fail2ban, swapfile, or ZRAM.' 'It does NOT change SSH, UFW, DNS, Fail2ban, swapfile, or ZRAM.')"
+  yellow "$(m 'Compatibility baseline includes: essential administration tools, BBR if supported, conservative VM memory settings, and a journald limit.' 'Compatibility baseline includes: essential administration tools, BBR if supported, conservative VM memory settings, and a journald limit.')"
+  yellow "$(m 'It does NOT change SSH, UFW, DNS, Fail2ban, automatic security updates, global proxy sysctl/nofile tuning, swapfile, or ZRAM.' 'It does NOT change SSH, UFW, DNS, Fail2ban, automatic security updates, global proxy sysctl/nofile tuning, swapfile, or ZRAM.')"
   log_action "baseline" "start mode=$mode"
   confirm_yes "$(m 'Run low-risk baseline?' 'Run low-risk baseline?')" || return 0
-  if ! install_basic_tools; then failures=$((failures + 1)); fi
-  if bbr_supported; then
-    if ! enable_bbr; then failures=$((failures + 1)); fi
-  else
-    status_info "$(m 'BBR is not supported; baseline skipped it.' 'BBR is not supported; baseline skipped it.')"
-  fi
-  if ! apply_memory_sysctl "$(recommend_swappiness)" "50"; then failures=$((failures + 1)); fi
-  if ! apply_proxy_sysctl; then failures=$((failures + 1)); fi
-  if ! raise_nofile_limits; then failures=$((failures + 1)); fi
-  if ! logs_limit_journald; then failures=$((failures + 1)); fi
+  if apply_safe_automatic_optimizations; then failures=0; else failures=$?; fi
   if [ "$failures" -gt 0 ]; then
     log_action "baseline" "partial-failure mode=$mode failures=$failures"
-    red "$(m "Baseline completed with $failures failed step(s). Review the output before rebooting." "Baseline completed with $failures failed step(s). Review the output before rebooting."). Review the output before rebooting.")"
+    red "$(m "Baseline completed with $failures failed step(s). Review the output before rebooting." "Baseline completed with $failures failed step(s). Review the output before rebooting.")"
     return 1
   fi
   log_action "baseline" "complete mode=$mode"
@@ -2047,10 +2871,10 @@ list_backups() {
 
 language_menu() {
   echo "1) English"
-  echo "2) Chinese"
+  echo "2) Chinese alias (English-safe fallback)"
   read -r -p "Choose [1/2]: " ans || true
   case "$ans" in
-    2|cn|CN|zh|chinese|Chinese) LANG_MODE="cn" ;;
+    2|cn|CN|zh|chinese|Chinese) LANG_MODE="en" ;;
     *) LANG_MODE="en" ;;
   esac
   green "$(m 'Language switched to English.' 'Language switched to English.')"
@@ -2067,15 +2891,20 @@ Commands:
   --doctor          Show read-only summary diagnostics and recommended commands.
   --compat          Show read-only OS/module compatibility report; does not require root.
   --preflight        Run read-only checks; does not require root.
+  --optimize-check   Assess a new VPS and classify automatic, optional, and reference optimizations; read-only.
+  --optimize-auto    Apply only the safe automatic tier; use --yes for unattended execution.
   --audit            Run full read-only environment audit.
   --status           Show system status.
   --memory-audit     Show memory/swap/ZRAM audit.
   --ssh-audit        Show SSH hardening audit.
-  --baseline         Run the low-risk baseline non-interactively.
+  --baseline         Compatibility alias for the safe automatic tier, without the assessment report.
   --ufw-audit        Show UFW/firewall audit.
   --fail2ban-audit   Show Fail2ban audit.
   --dns-audit        Show DNS audit.
   --logs-audit       Show log/journald audit.
+  --updates-audit    Show effective automatic security updates policy; does not require root.
+  --updates-enable   Enable daily distro security updates without automatic reboot.
+  --updates-disable  Disable periodic automatic updates through the tool-managed policy.
   --list-backups     List configuration backups created by this tool.
   --ufw-cf-sync      Incrementally sync Cloudflare allow rules for web ports.
   --version          Print version.
@@ -2083,13 +2912,15 @@ Commands:
 
 Options:
   --yes, -y          Auto-confirm prompts for non-interactive commands.
-  --lang en|cn       Set output language.
+  --lang en|cn       Set output language; cn currently uses English-safe output.
   --ports LIST       Cloudflare ports for --ufw-cf-sync, default: 80,443; comma-separated single ports only, no ranges.
 
 Environment:
   VPS_INIT_YES=1
-  VPS_INIT_LANG=en|cn
+  VPS_INIT_LANG=en|cn    # cn currently uses English-safe output
   VPS_INIT_CF_PORTS=80,443
+  VPS_INIT_CF_IPV4_FILE=/var/lib/vps-init/cloudflare-ips-v4.txt
+  VPS_INIT_CF_IPV6_FILE=/var/lib/vps-init/cloudflare-ips-v6.txt
   VPS_INIT_LOG=/var/log/vps-init-tool.log
   VPS_INIT_APT_LOCK_TIMEOUT=120
   VPS_INIT_APT_RETRIES=3
@@ -2128,7 +2959,7 @@ handle_cli() {
         UFW_CF_PORTS="$1"
         ufw_parse_cloudflare_ports "$UFW_CF_PORTS" || { red "Invalid --ports value: $UFW_CF_PORTS"; show_help; exit 2; }
         ;;
-      --doctor|--compat|--preflight|--audit|--status|--memory-audit|--ssh-audit|--baseline|--ufw-audit|--fail2ban-audit|--dns-audit|--logs-audit|--list-backups|--ufw-cf-sync)
+      --doctor|--compat|--preflight|--optimize-check|--optimize-auto|--audit|--status|--memory-audit|--ssh-audit|--baseline|--ufw-audit|--fail2ban-audit|--dns-audit|--logs-audit|--updates-audit|--updates-enable|--updates-disable|--list-backups|--ufw-cf-sync)
         [ -z "$cmd" ] || { red "Only one command may be specified."; show_help; exit 2; }
         cmd="$1"
         ;;
@@ -2148,6 +2979,8 @@ handle_cli() {
     --doctor) doctor_report; exit 0 ;;
     --compat) compatibility_report; exit 0 ;;
     --preflight) preflight_check; exit 0 ;;
+    --optimize-check) optimization_assessment; exit 0 ;;
+    --updates-audit) security_updates_audit; exit 0 ;;
   esac
   need_root
   require_debian_family
@@ -2161,11 +2994,14 @@ handle_cli() {
       --status) show_system_status ;;
       --memory-audit) memory_report ;;
       --ssh-audit) ssh_audit ;;
+      --optimize-auto) automatic_optimize "cli" ;;
       --baseline) ASSUME_YES=1; low_risk_baseline "cli" ;;
       --ufw-audit) ufw_audit ;;
       --fail2ban-audit) fail2ban_audit ;;
       --dns-audit) dns_audit ;;
       --logs-audit) logs_audit ;;
+      --updates-enable) security_updates_enable ;;
+      --updates-disable) security_updates_disable ;;
       --list-backups) list_backups ;;
       --ufw-cf-sync) ufw_sync_cloudflare_web ;;
     esac
@@ -2180,40 +3016,47 @@ main_menu() {
   while true; do
     clear_screen
     title "$SCRIPT_NAME $TOOL_VERSION"
-    echo "1) $(m 'Full environment audit' 'Full environment audit')"
-    echo "2) $(m 'System status' 'System status')"
-    echo "3) $(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
+    section "$(m 'Start here' 'Start here')"
+    echo "1) $(m 'Optimization assessment / guided setup' 'Optimization assessment / guided setup')"
+    echo "2) $(m 'Full environment audit' 'Full environment audit')"
+    echo "3) $(m 'System status' 'System status')"
+    section "$(m 'Optional modules' 'Optional modules')"
     echo "4) SSH"
     echo "5) $(m 'UFW Firewall / Cloudflare ranges' 'UFW Firewall / Cloudflare ranges')"
     echo "6) Fail2ban"
-    echo "7) DNS"
-    echo "8) $(m 'Logs / journald' 'Logs / journald')"
-    echo "9) $(m 'Enable BBR' 'Enable BBR')"
-    echo "10) $(m 'Proxy sysctl tuning' 'Proxy sysctl tuning')"
-    echo "11) $(m 'Raise nofile limits' 'Raise nofile limits')"
-    echo "12) $(m 'Install basic tools' 'Install basic tools')"
-    echo "13) $(m 'Run low-risk baseline' 'Run low-risk baseline')"
-    echo "14) $(m 'List config backups' 'List config backups')"
-    echo "15) $(m 'Switch language' 'Switch language')"
+    echo "7) $(m 'Automatic security updates' 'Automatic security updates')"
+    echo "8) $(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
+    echo "9) DNS"
+    echo "10) $(m 'Logs / journald' 'Logs / journald')"
+    section "$(m 'Advanced / maintenance' 'Advanced / maintenance')"
+    echo "11) $(m 'Enable BBR' 'Enable BBR')"
+    echo "12) $(m 'Proxy sysctl tuning' 'Proxy sysctl tuning')"
+    echo "13) $(m 'Raise nofile limits' 'Raise nofile limits')"
+    echo "14) $(m 'Install extended tool set' 'Install extended tool set')"
+    echo "15) $(m 'Apply safe automatic tier directly' 'Apply safe automatic tier directly')"
+    echo "16) $(m 'List config backups' 'List config backups')"
+    echo "17) $(m 'Switch language' 'Switch language')"
     echo "0) $(m 'Exit' 'Exit')"
     echo
     read -r -p "$(m 'Choose: ' 'Choose: ')" c
     case "$c" in
-      1) audit_all; pause ;;
-      2) show_system_status; pause ;;
-      3) memory_optimize_menu ;;
+      1) guided_optimization ;;
+      2) audit_all; pause ;;
+      3) show_system_status; pause ;;
       4) ssh_menu ;;
       5) ufw_menu ;;
       6) fail2ban_menu ;;
-      7) dns_menu ;;
-      8) logs_menu ;;
-      9) enable_bbr; pause ;;
-      10) apply_proxy_sysctl; pause ;;
-      11) raise_nofile_limits; pause ;;
-      12) install_basic_tools; pause ;;
-      13) low_risk_baseline; pause ;;
-      14) list_backups; pause ;;
-      15) language_menu; pause ;;
+      7) security_updates_menu ;;
+      8) memory_optimize_menu ;;
+      9) dns_menu ;;
+      10) logs_menu ;;
+      11) enable_bbr; pause ;;
+      12) apply_proxy_sysctl; pause ;;
+      13) raise_nofile_limits; pause ;;
+      14) install_basic_tools; pause ;;
+      15) automatic_optimize "interactive"; pause ;;
+      16) list_backups; pause ;;
+      17) language_menu; pause ;;
       0) exit 0 ;;
       *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
