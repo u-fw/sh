@@ -43,8 +43,8 @@ done
 vps_count="$(find . -maxdepth 1 -type f -name 'vps_init_tool*.sh' | wc -l | awk '{print $1}')"
 [ "$vps_count" = "1" ] || fail "expected exactly one vps_init_tool*.sh, found $vps_count"
 
-check_contains vps_init_tool.sh 'TOOL_VERSION="1\.2\.1"' 'vps_init_tool.sh version drifted'
-check_ascii_only vps_init_tool.sh 'vps_init_tool.sh must stay ASCII-only while Chinese output uses English-safe fallback'
+check_contains vps_init_tool.sh 'TOOL_VERSION="1\.3\.0"' 'vps_init_tool.sh version drifted'
+check_ascii_only vps_init_tool.sh 'vps_init_tool.sh must stay ASCII-only for portable terminal output'
 check_not_contains vps_init_tool.sh '"\): \$\(current_ssh_ports\)\)"\)' 'vps_init_tool.sh must not duplicate SSH port text after m()'
 check_not_contains vps_init_tool.sh "'\) before UFW changes to avoid locking you out\." 'vps_init_tool.sh must not duplicate UFW lockout text after m()'
 check_not_contains vps_init_tool.sh '"\): \$ssh_ports/tcp\."\)' 'vps_init_tool.sh must not duplicate SSH allow text after m()'
@@ -110,11 +110,51 @@ check_contains vps_init_tool.sh '--list-backups\) list_backups ;;' 'vps_init_too
 check_contains vps_init_tool.sh 'ufw_parse_cloudflare_ports "\$UFW_CF_PORTS" \|\| \{ red "Invalid --ports value: \$UFW_CF_PORTS"; show_help; exit 2; \}' 'vps_init_tool.sh CLI must validate --ports before running Cloudflare sync'
 check_contains vps_init_tool.sh 'comma-separated single ports only, no ranges' 'vps_init_tool.sh help must explain --ports format'
 check_contains vps_init_tool.sh 'Missing value for --lang' 'vps_init_tool.sh CLI must report a missing --lang value'
-check_contains vps_init_tool.sh 'Chinese alias \(English-safe fallback\)' 'vps_init_tool.sh language menu must explain Chinese fallback mode'
-check_contains vps_init_tool.sh 'cn currently uses English-safe output' 'vps_init_tool.sh help must explain cn language fallback'
+check_contains vps_init_tool.sh 'cn currently uses English output' 'vps_init_tool.sh help must explain cn compatibility behavior'
 check_contains vps_init_tool.sh 'zh\|zh-cn\|zh_CN\|cn\|CN\|chinese\|Chinese\) echo "en" ;;' 'vps_init_tool.sh Chinese language aliases must normalize to English-safe output'
-check_contains vps_init_tool.sh '2\|cn\|CN\|zh\|chinese\|Chinese\) LANG_MODE="en" ;;' 'vps_init_tool.sh Chinese menu choice must use English-safe language state'
+check_not_contains vps_init_tool.sh 'language_menu\(\)' 'vps_init_tool.sh must not expose a fake language switch in the interactive UI'
+check_contains vps_init_tool.sh 'ui_init\(\)' 'vps_init_tool.sh missing terminal color initialization'
+check_contains vps_init_tool.sh 'NO_COLOR' 'vps_init_tool.sh must honor the NO_COLOR convention'
+check_contains vps_init_tool.sh 'VPS_INIT_COLOR=auto\|always\|never' 'vps_init_tool.sh help must document color control'
+check_contains vps_init_tool.sh 'Missing value for --color' 'vps_init_tool.sh CLI must report a missing --color value'
+check_contains vps_init_tool.sh 'Invalid --color value' 'vps_init_tool.sh CLI must reject an invalid color mode'
+check_contains vps_init_tool.sh 'menu_item\(\)' 'vps_init_tool.sh missing reusable menu item renderer'
+check_contains vps_init_tool.sh 'menu_choice\(\)' 'vps_init_tool.sh missing validated menu input helper'
+check_contains vps_init_tool.sh 'Back \(b/q also works\)' 'vps_init_tool.sh menus must advertise keyboard navigation aliases'
+check_contains vps_init_tool.sh 'Security & Access' 'vps_init_tool.sh main navigation must group security modules'
+check_contains vps_init_tool.sh 'Memory & Performance' 'vps_init_tool.sh main navigation must group performance modules'
+check_contains vps_init_tool.sh 'Logs & Maintenance' 'vps_init_tool.sh main navigation must group maintenance modules'
+check_contains vps_init_tool.sh 'confirm_phrase .*"RESET"' 'vps_init_tool.sh UFW reset must use explicit phrase confirmation'
+check_contains vps_init_tool.sh 'if \[ "\$#" -gt 0 \]; then' 'vps_init_tool.sh interactive startup must not call the empty CLI dispatcher'
+check_contains vps_init_tool.sh 'VPS_INIT_LIB_ONLY' 'vps_init_tool.sh must expose a non-executing library mode for UI regression tests'
 check_contains vps_init_tool.sh 'Missing value for --ports' 'vps_init_tool.sh CLI must report a missing --ports value'
+
+ui_main_output="$(
+  VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never COLUMNS=52 \
+    bash -c 'source ./vps_init_tool.sh; main_menu' <<< '0'
+)"
+grep -Fq 'VPS Init Tool 1.3.0' <<< "$ui_main_output" || fail 'vps_init_tool.sh interactive entry did not render the versioned main menu'
+grep -Fq '[At a glance]' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the system status strip'
+grep -Fq 'Optimization assessment / guided setup' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the recommended starting action'
+grep -Fq 'Security and access' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render grouped navigation'
+[[ "$ui_main_output" != *$'\033['* ]] || fail 'vps_init_tool.sh emitted ANSI color in never-color mode'
+
+ui_submenu_output="$(
+  VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never \
+    bash -c 'source ./vps_init_tool.sh; security_access_menu' <<< $'9\nq'
+)"
+grep -Fq 'Invalid selection: 9.' <<< "$ui_submenu_output" || fail 'vps_init_tool.sh menu validation did not explain an invalid selection'
+grep -Fq 'Back (b/q also works)' <<< "$ui_submenu_output" || fail 'vps_init_tool.sh submenu did not advertise keyboard navigation aliases'
+
+menu_default="$(VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never bash -c 'source ./vps_init_tool.sh; choice=x; menu_choice choice "0 1 2" "1" <<< "" >/dev/null; printf "%s" "$choice"')"
+[ "$menu_default" = "1" ] || fail 'vps_init_tool.sh menu helper did not honor the default selection'
+menu_back_alias="$(VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never bash -c 'source ./vps_init_tool.sh; choice=x; menu_choice choice "0 1 2" <<< "q" >/dev/null; printf "%s" "$choice"')"
+[ "$menu_back_alias" = "0" ] || fail 'vps_init_tool.sh menu helper did not map q to Back'
+ui_widths="$(VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never bash -c 'source ./vps_init_tool.sh; COLUMNS=20; printf "%s " "$(term_width)"; COLUMNS=200; term_width')"
+[ "$ui_widths" = "44 100" ] || fail 'vps_init_tool.sh terminal width helper did not clamp narrow and wide layouts'
+ui_no_color="$(VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never bash -c 'source ./vps_init_tool.sh; UI_COLOR_MODE=always; ui_init; NO_COLOR=1; UI_COLOR_MODE=auto; ui_init; printf "%s" "$UI_RED"')"
+[ -z "$ui_no_color" ] || fail 'vps_init_tool.sh did not clear ANSI styles when NO_COLOR became active'
+
 check_contains vps_init_tool.sh 'Only one command may be specified' 'vps_init_tool.sh CLI must reject multiple commands'
 check_contains vps_init_tool.sh 'original_args="\$[*]"' 'vps_init_tool.sh CLI logging must preserve original arguments before shifting'
 check_contains vps_init_tool.sh 'log_action "cli" "command=\$cmd args=\$original_args"' 'vps_init_tool.sh CLI log must use preserved original arguments'
@@ -513,11 +553,10 @@ expect_rc() {
   [ "$rc" -eq "$expected" ] || fail "expected rc=$expected from: $*; got rc=$rc"
 }
 
-vps_lib="$(mktemp)"
-trap 'rm -f "$vps_lib"' EXIT
-sed '/^handle_cli "\$@"/,$d' vps_init_tool.sh > "$vps_lib"
-# shellcheck source=/dev/null
-source "$vps_lib"
+VPS_INIT_LIB_ONLY=1
+# shellcheck source=vps_init_tool.sh
+source ./vps_init_tool.sh
+unset VPS_INIT_LIB_ONLY
 
 modprobe() { fail 'bbr_available_readonly must not load kernel modules'; }
 bbr_available_readonly >/dev/null 2>&1 || true
@@ -728,6 +767,7 @@ rm -rf "$cf_validation_tmp"
 
   ufw_install() { :; }
   confirm_yes() { return 0; }
+  confirm_phrase() { return 0; }
   ufw_cf_lock_acquire() { return 0; }
   ufw_cf_lock_release() { return 0; }
   ufw_ensure_ssh_access() { return 0; }
@@ -777,10 +817,9 @@ get_root_avail_mb() { echo 100; }
 export SSH_CONNECTION='203.0.113.10 50000 192.0.2.10 2222'
 printf '%s\n' "$(current_ssh_ports)" | grep -qw 2222 || fail 'current_ssh_ports must include current SSH session port'
 
-rm -f "$vps_lib"
-trap - EXIT
-
 expect_rc 2 bash ./vps_init_tool.sh --lang
+expect_rc 2 bash ./vps_init_tool.sh --color
+expect_rc 2 bash ./vps_init_tool.sh --color purple --help
 expect_rc 2 bash ./vps_init_tool.sh --ports
 expect_rc 2 bash ./vps_init_tool.sh --status --audit
 bash ./vps_init_tool.sh --preflight >/dev/null || fail 'vps_init_tool.sh --preflight failed'
@@ -790,7 +829,7 @@ bash ./vps_init_tool.sh --optimize-check >/dev/null || fail 'vps_init_tool.sh --
 bash ./vps_init_tool.sh --updates-audit >/dev/null || fail 'vps_init_tool.sh --updates-audit failed'
 
 freedom_lib="$(mktemp)"
-trap 'rm -f "$vps_lib" "$freedom_lib"' EXIT
+trap 'rm -f "$freedom_lib"' EXIT
 sed '/^handle_cli "\$@"/,$d' freedom.sh > "$freedom_lib"
 # shellcheck source=/dev/null
 source "$freedom_lib"

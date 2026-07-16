@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# VPS Init Tool v1.2.1
+# VPS Init Tool v1.3.0
 # Debian/Ubuntu VPS bootstrap, audit and maintenance helper.
 # Scope: memory, SSH, UFW firewall, Fail2ban, DNS, logs, basic network tuning.
 # Principle: audit first, confirm before risky changes.
 
-TOOL_VERSION="1.2.1"
+TOOL_VERSION="1.3.0"
 SCRIPT_NAME="VPS Init Tool"
 BACKUP_ROOT="/root/vps-init-backups"
 SWAPFILE="/swapfile"
@@ -28,6 +28,15 @@ NONINTERACTIVE=0
 UFW_CF_PORTS="${VPS_INIT_CF_PORTS:-}"
 UFW_CF_LOCK_FD=""
 BACKUP_LAST_PATH=""
+UI_COLOR_MODE="${VPS_INIT_COLOR:-auto}"
+UI_RESET=""
+UI_BOLD=""
+UI_DIM=""
+UI_RED=""
+UI_GREEN=""
+UI_YELLOW=""
+UI_BLUE=""
+UI_CYAN=""
 
 # ---------- i18n / UI ----------
 normalize_lang() {
@@ -43,17 +52,50 @@ m() {
   if [ "${LANG_MODE:-en}" = "cn" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi
 }
 
-red() { printf '[BAD] %s\n' "$*"; }
-green() { printf '[OK] %s\n' "$*"; }
-yellow() { printf '[WARN] %s\n' "$*"; }
-blue() { printf '%s\n' "$*"; }
-muted() { printf '%s\n' "$*"; }
+ui_init() {
+  local enabled=0
+  UI_RESET=""
+  UI_BOLD=""
+  UI_DIM=""
+  UI_RED=""
+  UI_GREEN=""
+  UI_YELLOW=""
+  UI_BLUE=""
+  UI_CYAN=""
+  case "$UI_COLOR_MODE" in
+    always) enabled=1 ;;
+    never) enabled=0 ;;
+    auto)
+      if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then enabled=1; fi
+      ;;
+    *) UI_COLOR_MODE="auto" ;;
+  esac
+  if [ "$enabled" -eq 1 ]; then
+    UI_RESET=$'\033[0m'
+    UI_BOLD=$'\033[1m'
+    UI_DIM=$'\033[2m'
+    UI_RED=$'\033[31m'
+    UI_GREEN=$'\033[32m'
+    UI_YELLOW=$'\033[33m'
+    UI_BLUE=$'\033[34m'
+    UI_CYAN=$'\033[36m'
+  fi
+}
+
+red() { printf '%b[BAD]%b %s\n' "$UI_RED$UI_BOLD" "$UI_RESET" "$*"; }
+green() { printf '%b[OK]%b %s\n' "$UI_GREEN$UI_BOLD" "$UI_RESET" "$*"; }
+yellow() { printf '%b[WARN]%b %s\n' "$UI_YELLOW$UI_BOLD" "$UI_RESET" "$*"; }
+blue() { printf '%b%s%b\n' "$UI_BLUE$UI_BOLD" "$*" "$UI_RESET"; }
+muted() { printf '%b%s%b\n' "$UI_DIM" "$*" "$UI_RESET"; }
 
 term_width() {
   local w
-  w="$(tput cols 2>/dev/null || echo 88)"
-  [ "$w" -gt 120 ] && w=120
-  [ "$w" -lt 72 ] && w=72
+  w="${COLUMNS:-}"
+  if ! [[ "$w" =~ ^[0-9]+$ ]] || [ "$w" -le 0 ]; then
+    w="$(tput cols 2>/dev/null || echo 88)"
+  fi
+  [ "$w" -gt 100 ] && w=100
+  [ "$w" -lt 44 ] && w=44
   echo "$w"
 }
 
@@ -64,9 +106,11 @@ hr() {
 }
 
 title() {
+  local heading="$1" subtitle="${2:-}"
   echo
   hr
-  blue "$1"
+  printf '%b%s%b\n' "$UI_BLUE$UI_BOLD" "$heading" "$UI_RESET"
+  [ -z "$subtitle" ] || printf '%b%s%b\n' "$UI_DIM" "$subtitle" "$UI_RESET"
   hr
 }
 
@@ -78,14 +122,51 @@ section() {
 
 kv() {
   local k="$1" v="${2:-}"
-  printf '  %-30s %s\n' "$k" "$v"
+  if [ "$(term_width)" -lt 68 ]; then
+    printf '  %s: %s\n' "$k" "$v"
+  else
+    printf '  %-28s %s\n' "$k" "$v"
+  fi
 }
 
-status_ok() { printf '  %-8s %s\n' "OK" "$*"; }
-status_warn() { printf '  %-8s %s\n' "WARN" "$*"; }
-status_bad() { printf '  %-8s %s\n' "BAD" "$*"; }
-status_info() { printf '  %-8s %s\n' "INFO" "$*"; }
+status_ok() { printf '  %b%-6s%b %s\n' "$UI_GREEN$UI_BOLD" "OK" "$UI_RESET" "$*"; }
+status_warn() { printf '  %b%-6s%b %s\n' "$UI_YELLOW$UI_BOLD" "WARN" "$UI_RESET" "$*"; }
+status_bad() { printf '  %b%-6s%b %s\n' "$UI_RED$UI_BOLD" "BAD" "$UI_RESET" "$*"; }
+status_info() { printf '  %b%-6s%b %s\n' "$UI_CYAN$UI_BOLD" "INFO" "$UI_RESET" "$*"; }
 print_block() { sed 's/^/    /'; }
+
+menu_item() {
+  local key="$1" label="$2" tag="${3:-}" tag_color="$UI_DIM"
+  case "$tag" in
+    RECOMMENDED) tag_color="$UI_GREEN" ;;
+    READ-ONLY) tag_color="$UI_CYAN" ;;
+    ADVANCED) tag_color="$UI_YELLOW" ;;
+    DANGER) tag_color="$UI_RED" ;;
+  esac
+  printf '  %2s) %s' "$key" "$label"
+  [ -z "$tag" ] || printf '  %b[%s]%b' "$tag_color" "$tag" "$UI_RESET"
+  printf '\n'
+}
+
+menu_back() { menu_item "0" "$(m 'Back (b/q also works)' 'Back (b/q also works)')"; }
+
+menu_choice() {
+  local result_var="$1" allowed="$2" default="${3:-}" value prompt
+  while true; do
+    if [ -n "$default" ]; then
+      prompt="$(m "Select [$default]: " "Select [$default]: ")"
+    else
+      prompt="$(m 'Select: ' 'Select: ')"
+    fi
+    if ! read -r -p "$prompt" value; then return 1; fi
+    value="${value:-$default}"
+    case "$value" in b|B|back|Back|q|Q|quit|Quit) value="0" ;; esac
+    case " $allowed " in
+      *" $value "*) printf -v "$result_var" '%s' "$value"; return 0 ;;
+    esac
+    status_bad "$(m "Invalid selection: ${value:-empty}. Choose one of: $allowed." "Invalid selection: ${value:-empty}. Choose one of: $allowed.")"
+  done
+}
 
 cleanup_files() {
   [ "$#" -eq 0 ] || rm -f -- "$@"
@@ -98,11 +179,15 @@ log_action() {
     "$(date '+%F %T %Z')" "$action" "$(id -un 2>/dev/null || echo unknown)" "$detail" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-clear_screen() { clear 2>/dev/null || true; }
+clear_screen() {
+  [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 0
+  clear 2>/dev/null || true
+}
 
 pause() {
+  [ "${NONINTERACTIVE:-0}" = "0" ] && [ -t 0 ] || return 0
   echo
-  read -r -p "$(m 'Press Enter to continue...' 'Press Enter to continue...')" _ || true
+  read -r -p "$(m 'Press Enter to continue, or Ctrl+C to exit...' 'Press Enter to continue, or Ctrl+C to exit...')" _ || true
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -123,16 +208,6 @@ need_root() {
 
 choose_language() {
   LANG_MODE="$(normalize_lang "$LANG_MODE")"
-  if [ -t 0 ] && [ -z "${VPS_INIT_LANG:-}" ]; then
-    echo "Language / language:"
-    echo "1) English"
-    echo "2) Chinese alias (English-safe fallback)"
-    read -r -p "Choose [1/2, default 1]: " ans || true
-    case "$ans" in
-      2|cn|CN|zh|chinese|Chinese) LANG_MODE="en" ;;
-      *) LANG_MODE="en" ;;
-    esac
-  fi
 }
 
 load_os_release() {
@@ -193,8 +268,37 @@ confirm_yes() {
     status_warn "$(m 'Confirmation required; use --yes or VPS_INIT_YES=1 for non-interactive execution.' 'Confirmation required; use --yes or VPS_INIT_YES=1 for non-interactive execution.')"
     return 1
   fi
-  read -r -p "$(m 'Type YES to continue: ' 'Type YES to continue: ')" ans || true
-  [ "$ans" = "YES" ]
+  while true; do
+    read -r -p "$(m 'Continue? [y/N]: ' 'Continue? [y/N]: ')" ans || return 1
+    case "$ans" in
+      y|Y|yes|YES|Yes) return 0 ;;
+      ""|n|N|no|NO|No)
+        status_info "$(m 'Cancelled; no changes were made.' 'Cancelled; no changes were made.')"
+        return 1
+        ;;
+      *) status_bad "$(m 'Please enter y or n.' 'Please enter y or n.')" ;;
+    esac
+  done
+}
+
+confirm_phrase() {
+  local prompt="$1" phrase="$2" ans
+  case "${ASSUME_YES:-0}" in
+    1|yes|YES|true|TRUE)
+      status_info "$(m "Auto-confirmed: $prompt" "Auto-confirmed: $prompt")"
+      return 0
+      ;;
+  esac
+  echo
+  yellow "$prompt"
+  if [ "${NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+    status_warn "$(m 'Explicit confirmation required; use --yes only after reviewing the operation.' 'Explicit confirmation required; use --yes only after reviewing the operation.')"
+    return 1
+  fi
+  read -r -p "$(m "Type $phrase to continue: " "Type $phrase to continue: ")" ans || return 1
+  if [ "$ans" = "$phrase" ]; then return 0; fi
+  status_info "$(m 'Confirmation did not match; no changes were made.' 'Confirmation did not match; no changes were made.')"
+  return 1
 }
 
 input_default() {
@@ -1098,14 +1202,14 @@ setup_zram() {
 memory_optimize_menu() {
   while true; do
     clear_screen
-    title "$(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
-    echo "1) $(m 'Memory audit report' 'Memory audit report')"
-    echo "2) $(m 'Configure/Reconfigure swapfile' 'Configure/Reconfigure swapfile')"
-    echo "3) $(m 'Configure/Reconfigure ZRAM' 'Configure/Reconfigure ZRAM')"
-    echo "4) $(m 'Apply VM sysctl only' 'Apply VM sysctl only')"
-    echo "5) $(m 'Apply full recommended memory profile' 'Apply full recommended memory profile')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "$(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')" "$(m 'Inspect first; choose swap and ZRAM according to workload and disk endurance.' 'Inspect first; choose swap and ZRAM according to workload and disk endurance.')"
+    menu_item "1" "$(m 'Memory audit report' 'Memory audit report')" "READ-ONLY"
+    menu_item "2" "$(m 'Configure or replace swapfile' 'Configure or replace swapfile')"
+    menu_item "3" "$(m 'Configure or replace ZRAM' 'Configure or replace ZRAM')"
+    menu_item "4" "$(m 'Apply VM memory sysctl only' 'Apply VM memory sysctl only')"
+    menu_item "5" "$(m 'Guided recommended memory profile' 'Guided recommended memory profile')" "RECOMMENDED"
+    menu_back
+    menu_choice c "0 1 2 3 4 5" || return
     case "$c" in
       1) memory_report; pause ;;
       2) setup_swapfile; pause ;;
@@ -1121,7 +1225,6 @@ memory_optimize_menu() {
         setup_zram
         pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -1713,20 +1816,19 @@ ssh_restore_fragment() {
 ssh_menu() {
   while true; do
     clear_screen
-    title "SSH"
-    echo "1) $(m 'SSH audit' 'SSH audit')"
-    echo "2) $(m 'Install public key' 'Install public key')"
-    echo "3) $(m 'Configure SSH hardening fragment' 'Configure SSH hardening fragment')"
-    echo "4) $(m 'Restore/remove hardening fragment' 'Restore/remove hardening fragment')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "SSH" "$(m 'Recommended order: audit, install and test a key, then apply hardening.' 'Recommended order: audit, install and test a key, then apply hardening.')"
+    menu_item "1" "$(m 'Audit effective SSH settings' 'Audit effective SSH settings')" "READ-ONLY"
+    menu_item "2" "$(m 'Install an SSH public key' 'Install an SSH public key')" "RECOMMENDED"
+    menu_item "3" "$(m 'Configure SSH hardening' 'Configure SSH hardening')" "RECOMMENDED"
+    menu_item "4" "$(m 'Remove the managed hardening fragment' 'Remove the managed hardening fragment')"
+    menu_back
+    menu_choice c "0 1 2 3 4" || return
     case "$c" in
       1) ssh_audit; pause ;;
       2) ssh_install_key; pause ;;
       3) ssh_write_hardening; pause ;;
       4) ssh_restore_fragment; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2046,7 +2148,7 @@ ufw_allow_cloudflare_web() {
 
 ufw_reset_safe() {
   ufw_install
-  confirm_yes "$(m 'Reset ALL UFW rules?' 'Reset ALL UFW rules?')" || return 0
+  confirm_phrase "$(m 'Reset ALL UFW rules? Remote services may become exposed or unreachable.' 'Reset ALL UFW rules? Remote services may become exposed or unreachable.')" "RESET" || return 0
   ufw --force reset || return 1
   rm -f -- "$UFW_CF_STATE_FILE"
   green "$(m 'UFW reset.' 'UFW reset.')"
@@ -2055,17 +2157,17 @@ ufw_reset_safe() {
 ufw_menu() {
   while true; do
     clear_screen
-    title "$(m 'UFW Firewall' 'UFW Firewall')"
-    echo "1) $(m 'Firewall audit' 'Firewall audit')"
-    echo "2) $(m 'Install UFW' 'Install UFW')"
-    echo "3) $(m 'Safe init UFW' 'Safe init UFW')"
-    echo "4) $(m 'Allow custom port' 'Allow custom port')"
-    echo "5) $(m 'Allow only IP/CIDR to port' 'Allow only IP/CIDR to port')"
-    echo "6) $(m 'Rate-limit SSH' 'Rate-limit SSH')"
-    echo "7) $(m 'Add Cloudflare ranges to 80/443' 'Add Cloudflare ranges to 80/443')"
-    echo "8) $(m 'Reset UFW' 'Reset UFW')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "$(m 'UFW Firewall' 'UFW Firewall')" "$(m 'SSH access is detected and allowed before safe initialization.' 'SSH access is detected and allowed before safe initialization.')"
+    menu_item "1" "$(m 'Audit firewall and listening ports' 'Audit firewall and listening ports')" "READ-ONLY"
+    menu_item "2" "$(m 'Install UFW package' 'Install UFW package')"
+    menu_item "3" "$(m 'Safely initialize and enable UFW' 'Safely initialize and enable UFW')" "RECOMMENDED"
+    menu_item "4" "$(m 'Allow a custom port or range' 'Allow a custom port or range')"
+    menu_item "5" "$(m 'Restrict a port to an IP or CIDR' 'Restrict a port to an IP or CIDR')"
+    menu_item "6" "$(m 'Rate-limit detected SSH ports' 'Rate-limit detected SSH ports')"
+    menu_item "7" "$(m 'Incrementally sync Cloudflare web ranges' 'Incrementally sync Cloudflare web ranges')"
+    menu_item "8" "$(m 'Reset every UFW rule' 'Reset every UFW rule')" "DANGER"
+    menu_back
+    menu_choice c "0 1 2 3 4 5 6 7 8" || return
     case "$c" in
       1) ufw_audit; pause ;;
       2) ufw_install; pause ;;
@@ -2076,7 +2178,6 @@ ufw_menu() {
       7) ufw_allow_cloudflare_web; pause ;;
       8) ufw_reset_safe; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2157,18 +2258,17 @@ fail2ban_unban() {
 fail2ban_menu() {
   while true; do
     clear_screen
-    title "Fail2ban"
-    echo "1) $(m 'Audit' 'Audit')"
-    echo "2) $(m 'Install/configure sshd jail' 'Install/configure sshd jail')"
-    echo "3) $(m 'Unban IP' 'Unban IP')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "Fail2ban" "$(m 'Protect internet-facing SSH after its final port and login policy are configured.' 'Protect internet-facing SSH after its final port and login policy are configured.')"
+    menu_item "1" "$(m 'Audit service and active jails' 'Audit service and active jails')" "READ-ONLY"
+    menu_item "2" "$(m 'Install or update the SSH jail' 'Install or update the SSH jail')" "RECOMMENDED"
+    menu_item "3" "$(m 'Unban an IP address' 'Unban an IP address')"
+    menu_back
+    menu_choice c "0 1 2 3" || return
     case "$c" in
       1) fail2ban_audit; pause ;;
       2) fail2ban_setup_sshd; pause ;;
       3) fail2ban_unban; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2291,20 +2391,19 @@ EOF2
 dns_menu() {
   while true; do
     clear_screen
-    title "DNS"
-    echo "1) $(m 'DNS audit' 'DNS audit')"
-    echo "2) $(m 'Test common public resolvers' 'Test common public resolvers')"
-    echo "3) $(m 'Apply via systemd-resolved' 'Apply via systemd-resolved')"
-    echo "4) $(m 'Apply by direct /etc/resolv.conf edit' 'Apply by direct /etc/resolv.conf edit')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "DNS" "$(m 'Cloud-init, DHCP, or a network manager may own resolver settings.' 'Cloud-init, DHCP, or a network manager may own resolver settings.')"
+    menu_item "1" "$(m 'Audit resolver ownership and settings' 'Audit resolver ownership and settings')" "READ-ONLY"
+    menu_item "2" "$(m 'Test common public resolvers' 'Test common public resolvers')" "READ-ONLY"
+    menu_item "3" "$(m 'Configure systemd-resolved' 'Configure systemd-resolved')"
+    menu_item "4" "$(m 'Edit /etc/resolv.conf directly' 'Edit /etc/resolv.conf directly')" "ADVANCED"
+    menu_back
+    menu_choice c "0 1 2 3 4" || return
     case "$c" in
       1) dns_audit; pause ;;
       2) dns_test; pause ;;
       3) dns_apply_resolved; pause ;;
       4) dns_apply_resolvconf; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2374,18 +2473,17 @@ logs_vacuum() {
 logs_menu() {
   while true; do
     clear_screen
-    title "$(m 'Logs' 'Logs')"
-    echo "1) $(m 'Logs audit' 'Logs audit')"
-    echo "2) $(m 'Limit journald size' 'Limit journald size')"
-    echo "3) $(m 'Vacuum journald now' 'Vacuum journald now')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "$(m 'Logs / journald' 'Logs / journald')" "$(m 'Bound disk use while preserving enough history for incident review.' 'Bound disk use while preserving enough history for incident review.')"
+    menu_item "1" "$(m 'Audit log disk usage' 'Audit log disk usage')" "READ-ONLY"
+    menu_item "2" "$(m 'Set journald size and retention limits' 'Set journald size and retention limits')" "RECOMMENDED"
+    menu_item "3" "$(m 'Vacuum old journal data now' 'Vacuum old journal data now')"
+    menu_back
+    menu_choice c "0 1 2 3" || return
     case "$c" in
       1) logs_audit; pause ;;
       2) logs_limit_journald; pause ;;
       3) logs_vacuum; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2533,18 +2631,17 @@ security_updates_disable() {
 security_updates_menu() {
   while true; do
     clear_screen
-    title "$(m 'Automatic Security Updates' 'Automatic Security Updates')"
-    echo "1) $(m 'Audit effective policy' 'Audit effective policy')"
-    echo "2) $(m 'Enable daily security updates (no automatic reboot)' 'Enable daily security updates (no automatic reboot)')"
-    echo "3) $(m 'Disable automatic updates through managed policy' 'Disable automatic updates through managed policy')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    title "$(m 'Automatic Security Updates' 'Automatic Security Updates')" "$(m 'Use the distribution policy; automatic reboot remains disabled.' 'Use the distribution policy; automatic reboot remains disabled.')"
+    menu_item "1" "$(m 'Audit the effective update policy' 'Audit the effective update policy')" "READ-ONLY"
+    menu_item "2" "$(m 'Enable daily security updates' 'Enable daily security updates')" "RECOMMENDED"
+    menu_item "3" "$(m 'Disable updates through the managed policy' 'Disable updates through the managed policy')"
+    menu_back
+    menu_choice c "0 1 2 3" || return
     case "$c" in
       1) security_updates_audit; pause ;;
       2) security_updates_enable; pause ;;
       3) security_updates_disable; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2793,18 +2890,18 @@ automatic_optimize() {
 guided_optimization() {
   automatic_optimize "guided" || true
   while true; do
-    title "$(m 'Optional Optimization' 'Optional Optimization')"
-    status_info "$(m 'Recommended order: secure SSH access first, then firewall and Fail2ban.' 'Recommended order: secure SSH access first, then firewall and Fail2ban.')"
-    echo "1) $(m 'SSH audit / key setup / hardening' 'SSH audit / key setup / hardening')"
-    echo "2) $(m 'UFW safe initialization / Cloudflare rules' 'UFW safe initialization / Cloudflare rules')"
-    echo "3) Fail2ban"
-    echo "4) $(m 'Automatic security updates' 'Automatic security updates')"
-    echo "5) $(m 'Swap / ZRAM workload choices' 'Swap / ZRAM workload choices')"
-    echo "6) $(m 'DNS audit and testing' 'DNS audit and testing')"
-    echo "7) $(m 'Advanced measured tuning' 'Advanced measured tuning')"
-    echo "8) $(m 'Run optimization assessment again' 'Run optimization assessment again')"
-    echo "0) $(m 'Back' 'Back')"
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    clear_screen
+    title "$(m 'Guided Setup' 'Guided Setup')" "$(m 'Recommended order: SSH key access, firewall, Fail2ban, then maintenance choices.' 'Recommended order: SSH key access, firewall, Fail2ban, then maintenance choices.')"
+    menu_item "1" "$(m 'SSH audit, key setup, and hardening' 'SSH audit, key setup, and hardening')" "RECOMMENDED"
+    menu_item "2" "$(m 'UFW safe initialization and Cloudflare rules' 'UFW safe initialization and Cloudflare rules')" "RECOMMENDED"
+    menu_item "3" "Fail2ban" "RECOMMENDED"
+    menu_item "4" "$(m 'Automatic security updates' 'Automatic security updates')"
+    menu_item "5" "$(m 'Swap and ZRAM workload choices' 'Swap and ZRAM workload choices')"
+    menu_item "6" "$(m 'DNS audit and testing' 'DNS audit and testing')"
+    menu_item "7" "$(m 'Advanced measured tuning' 'Advanced measured tuning')" "ADVANCED"
+    menu_item "8" "$(m 'Run the optimization assessment again' 'Run the optimization assessment again')" "READ-ONLY"
+    menu_back
+    menu_choice c "0 1 2 3 4 5 6 7 8" || return
     case "$c" in
       1) ssh_menu ;;
       2) ufw_menu ;;
@@ -2819,7 +2916,6 @@ guided_optimization() {
         ;;
       8) optimization_assessment; pause ;;
       0) return ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
@@ -2869,15 +2965,96 @@ list_backups() {
   find "$BACKUP_ROOT" -maxdepth 1 -type f -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort || true
 }
 
-language_menu() {
-  echo "1) English"
-  echo "2) Chinese alias (English-safe fallback)"
-  read -r -p "Choose [1/2]: " ans || true
-  case "$ans" in
-    2|cn|CN|zh|chinese|Chinese) LANG_MODE="en" ;;
-    *) LANG_MODE="en" ;;
-  esac
-  green "$(m 'Language switched to English.' 'Language switched to English.')"
+main_menu_status() {
+  local host os kernel ssh_ports ufw_state fail2ban_state
+  load_os_release
+  host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  os="${PRETTY_NAME:-unknown}"
+  kernel="$(uname -r 2>/dev/null || echo unknown)"
+  ssh_ports="$(current_ssh_ports 2>/dev/null || true)"
+  ssh_ports="${ssh_ports:-unknown}"
+  if ! has_cmd ufw; then
+    ufw_state="not installed"
+  elif ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw_state="active"
+  else
+    ufw_state="inactive"
+  fi
+  if is_systemd && has_cmd fail2ban-client; then
+    fail2ban_state="$(systemctl is-active fail2ban 2>/dev/null || true)"
+    fail2ban_state="${fail2ban_state:-inactive}"
+  else
+    fail2ban_state="not active"
+  fi
+  section "$(m 'At a glance' 'At a glance')"
+  kv "System" "$host | $os"
+  kv "Kernel" "$kernel"
+  kv "Remote access" "SSH $ssh_ports/tcp | UFW $ufw_state | Fail2ban $fail2ban_state"
+}
+
+security_access_menu() {
+  local c
+  while true; do
+    clear_screen
+    title "$(m 'Security & Access' 'Security & Access')" "$(m 'Secure SSH first, then enable the firewall and Fail2ban.' 'Secure SSH first, then enable the firewall and Fail2ban.')"
+    menu_item "1" "SSH keys and hardening" "RECOMMENDED"
+    menu_item "2" "$(m 'UFW firewall and Cloudflare ranges' 'UFW firewall and Cloudflare ranges')" "RECOMMENDED"
+    menu_item "3" "Fail2ban"
+    menu_item "4" "$(m 'Automatic security updates' 'Automatic security updates')"
+    menu_back
+    menu_choice c "0 1 2 3 4" || return
+    case "$c" in
+      1) ssh_menu ;;
+      2) ufw_menu ;;
+      3) fail2ban_menu ;;
+      4) security_updates_menu ;;
+      0) return ;;
+    esac
+  done
+}
+
+performance_menu() {
+  local c
+  while true; do
+    clear_screen
+    title "$(m 'Memory & Performance' 'Memory & Performance')" "$(m 'Conservative defaults first; global network tuning remains advanced.' 'Conservative defaults first; global network tuning remains advanced.')"
+    menu_item "1" "$(m 'Memory, swap, and ZRAM' 'Memory, swap, and ZRAM')"
+    menu_item "2" "$(m 'Enable BBR with fq when supported' 'Enable BBR with fq when supported')"
+    menu_item "3" "$(m 'Apply global proxy sysctl tuning' 'Apply global proxy sysctl tuning')" "ADVANCED"
+    menu_item "4" "$(m 'Raise global nofile defaults' 'Raise global nofile defaults')" "ADVANCED"
+    menu_item "5" "$(m 'Apply the safe automatic tier' 'Apply the safe automatic tier')" "RECOMMENDED"
+    menu_back
+    menu_choice c "0 1 2 3 4 5" || return
+    case "$c" in
+      1) memory_optimize_menu ;;
+      2) enable_bbr; pause ;;
+      3) apply_proxy_sysctl; pause ;;
+      4) raise_nofile_limits; pause ;;
+      5) automatic_optimize "interactive"; pause ;;
+      0) return ;;
+    esac
+  done
+}
+
+maintenance_menu() {
+  local c
+  while true; do
+    clear_screen
+    title "$(m 'Logs & Maintenance' 'Logs & Maintenance')" "$(m 'Review storage, tools, backups, and command-line options.' 'Review storage, tools, backups, and command-line options.')"
+    menu_item "1" "$(m 'Logs and journald' 'Logs and journald')"
+    menu_item "2" "$(m 'Install the extended administration tool set' 'Install the extended administration tool set')"
+    menu_item "3" "$(m 'List configuration backups' 'List configuration backups')" "READ-ONLY"
+    menu_item "4" "$(m 'Show command-line help' 'Show command-line help')" "READ-ONLY"
+    menu_back
+    menu_choice c "0 1 2 3 4" || return
+    case "$c" in
+      1) logs_menu ;;
+      2) install_basic_tools; pause ;;
+      3) list_backups; pause ;;
+      4) show_help; pause ;;
+      0) return ;;
+    esac
+  done
 }
 
 show_help() {
@@ -2912,12 +3089,14 @@ Commands:
 
 Options:
   --yes, -y          Auto-confirm prompts for non-interactive commands.
-  --lang en|cn       Set output language; cn currently uses English-safe output.
+  --lang en|cn       Compatibility option; cn currently uses English output.
+  --color MODE       Color output: auto, always, or never. Default: auto.
   --ports LIST       Cloudflare ports for --ufw-cf-sync, default: 80,443; comma-separated single ports only, no ranges.
 
 Environment:
   VPS_INIT_YES=1
-  VPS_INIT_LANG=en|cn    # cn currently uses English-safe output
+  VPS_INIT_LANG=en|cn    # cn currently uses English output
+  VPS_INIT_COLOR=auto|always|never
   VPS_INIT_CF_PORTS=80,443
   VPS_INIT_CF_IPV4_FILE=/var/lib/vps-init/cloudflare-ips-v4.txt
   VPS_INIT_CF_IPV6_FILE=/var/lib/vps-init/cloudflare-ips-v6.txt
@@ -2951,6 +3130,14 @@ handle_cli() {
         case "$1" in
           en|cn) LANG_MODE="$1" ;;
           *) red "Invalid --lang value: $1. Use en or cn."; show_help; exit 2 ;;
+        esac
+        ;;
+      --color)
+        if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then red "Missing value for --color."; show_help; exit 2; fi
+        shift
+        case "$1" in
+          auto|always|never) UI_COLOR_MODE="$1"; ui_init ;;
+          *) red "Invalid --color value: $1. Use auto, always, or never."; show_help; exit 2 ;;
         esac
         ;;
       --ports)
@@ -3013,58 +3200,43 @@ handle_cli() {
 }
 
 main_menu() {
+  local c
   while true; do
     clear_screen
-    title "$SCRIPT_NAME $TOOL_VERSION"
+    title "$SCRIPT_NAME $TOOL_VERSION" "$(m 'Audit first. Apply only changes that match this server and workload.' 'Audit first. Apply only changes that match this server and workload.')"
+    main_menu_status
     section "$(m 'Start here' 'Start here')"
-    echo "1) $(m 'Optimization assessment / guided setup' 'Optimization assessment / guided setup')"
-    echo "2) $(m 'Full environment audit' 'Full environment audit')"
-    echo "3) $(m 'System status' 'System status')"
-    section "$(m 'Optional modules' 'Optional modules')"
-    echo "4) SSH"
-    echo "5) $(m 'UFW Firewall / Cloudflare ranges' 'UFW Firewall / Cloudflare ranges')"
-    echo "6) Fail2ban"
-    echo "7) $(m 'Automatic security updates' 'Automatic security updates')"
-    echo "8) $(m 'Memory / Swap / ZRAM' 'Memory / Swap / ZRAM')"
-    echo "9) DNS"
-    echo "10) $(m 'Logs / journald' 'Logs / journald')"
-    section "$(m 'Advanced / maintenance' 'Advanced / maintenance')"
-    echo "11) $(m 'Enable BBR' 'Enable BBR')"
-    echo "12) $(m 'Proxy sysctl tuning' 'Proxy sysctl tuning')"
-    echo "13) $(m 'Raise nofile limits' 'Raise nofile limits')"
-    echo "14) $(m 'Install extended tool set' 'Install extended tool set')"
-    echo "15) $(m 'Apply safe automatic tier directly' 'Apply safe automatic tier directly')"
-    echo "16) $(m 'List config backups' 'List config backups')"
-    echo "17) $(m 'Switch language' 'Switch language')"
-    echo "0) $(m 'Exit' 'Exit')"
+    menu_item "1" "$(m 'Optimization assessment / guided setup' 'Optimization assessment / guided setup')" "RECOMMENDED"
+    menu_item "2" "$(m 'Full environment audit' 'Full environment audit')" "READ-ONLY"
+    menu_item "3" "$(m 'System status' 'System status')" "READ-ONLY"
+    section "$(m 'Manage' 'Manage')"
+    menu_item "4" "$(m 'Security and access' 'Security and access')"
+    menu_item "5" "$(m 'Memory and performance' 'Memory and performance')"
+    menu_item "6" "DNS"
+    menu_item "7" "$(m 'Logs and maintenance' 'Logs and maintenance')"
+    menu_item "0" "$(m 'Exit' 'Exit')"
     echo
-    read -r -p "$(m 'Choose: ' 'Choose: ')" c
+    menu_choice c "0 1 2 3 4 5 6 7" "1" || exit 0
     case "$c" in
       1) guided_optimization ;;
       2) audit_all; pause ;;
       3) show_system_status; pause ;;
-      4) ssh_menu ;;
-      5) ufw_menu ;;
-      6) fail2ban_menu ;;
-      7) security_updates_menu ;;
-      8) memory_optimize_menu ;;
-      9) dns_menu ;;
-      10) logs_menu ;;
-      11) enable_bbr; pause ;;
-      12) apply_proxy_sysctl; pause ;;
-      13) raise_nofile_limits; pause ;;
-      14) install_basic_tools; pause ;;
-      15) automatic_optimize "interactive"; pause ;;
-      16) list_backups; pause ;;
-      17) language_menu; pause ;;
+      4) security_access_menu ;;
+      5) performance_menu ;;
+      6) dns_menu ;;
+      7) maintenance_menu ;;
       0) exit 0 ;;
-      *) yellow "$(m 'Invalid choice' 'Invalid choice')"; pause ;;
     esac
   done
 }
 
-handle_cli "$@"
-need_root
-choose_language
-require_debian_family
-main_menu
+ui_init
+if [ "${VPS_INIT_LIB_ONLY:-0}" != "1" ]; then
+  if [ "$#" -gt 0 ]; then
+    handle_cli "$@"
+  fi
+  need_root
+  choose_language
+  require_debian_family
+  main_menu
+fi
