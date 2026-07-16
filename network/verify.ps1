@@ -45,7 +45,7 @@ if ($vpsCount -ne 1) {
   Fail "expected exactly one vps_init_tool*.sh, found $vpsCount"
 }
 
-Check-Contains 'vps_init_tool.sh' 'TOOL_VERSION="1\.3\.0"' 'vps_init_tool.sh version drifted'
+Check-Contains 'vps_init_tool.sh' 'TOOL_VERSION="1\.3\.1"' 'vps_init_tool.sh version drifted'
 Check-AsciiOnly 'vps_init_tool.sh' 'vps_init_tool.sh must stay ASCII-only for portable terminal output'
 Check-NotContains 'vps_init_tool.sh' '"\): \$\(current_ssh_ports\)\)"\)' 'vps_init_tool.sh must not duplicate SSH port text after m()'
 Check-NotContains 'vps_init_tool.sh' '''\) before UFW changes to avoid locking you out\.' 'vps_init_tool.sh must not duplicate UFW lockout text after m()'
@@ -226,8 +226,10 @@ Check-Contains 'vps_init_tool.sh' 'ZRAM tools activation failed\. Restoring the 
 Check-Contains 'vps_init_tool.sh' 'restore_managed_file "\$config_file" "\$config_backup"' 'vps_init_tool.sh ZRAM backends must restore previous managed configuration on failure'
 Check-NotContains 'vps_init_tool.sh' 'setup_zram_generator \|\| \{ stop_known_zram_services; setup_zram_fallback; \}' 'vps_init_tool.sh must not layer fallback ZRAM over a failed generator backend'
 Check-NotContains 'vps_init_tool.sh' 'setup_zram_tools "\$size_hint" \|\| \{ stop_known_zram_services; setup_zram_fallback; \}' 'vps_init_tool.sh must not layer fallback ZRAM over failed zram-tools'
-Check-Contains 'vps_init_tool.sh' 'setup_zram_generator \|\| return 1' 'vps_init_tool.sh must propagate zram-generator activation failure'
+Check-Contains 'vps_init_tool.sh' 'setup_zram_generator "\$zram_was_active" \|\| return 1' 'vps_init_tool.sh must propagate zram-generator activation failure'
 Check-Contains 'vps_init_tool.sh' 'setup_zram_tools "\$size_hint" \|\| return 1' 'vps_init_tool.sh must propagate zram-tools activation failure'
+Check-Contains 'vps_init_tool.sh' 'normalize_zram_generator_size\(\)' 'vps_init_tool.sh must normalize zram-generator size syntax'
+Check-NotContains 'vps_init_tool.sh' 'min\(ram / 2, 1024M\)' 'vps_init_tool.sh must not suggest SI suffixes inside zram-generator expressions'
 Check-Contains 'vps_init_tool.sh' '--baseline' 'vps_init_tool.sh missing low-risk baseline CLI'
 Check-Contains 'vps_init_tool.sh' '--preflight' 'vps_init_tool.sh missing read-only preflight CLI'
 Check-Contains 'vps_init_tool.sh' 'preflight_check\(\)' 'vps_init_tool.sh missing read-only preflight helper'

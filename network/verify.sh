@@ -43,7 +43,7 @@ done
 vps_count="$(find . -maxdepth 1 -type f -name 'vps_init_tool*.sh' | wc -l | awk '{print $1}')"
 [ "$vps_count" = "1" ] || fail "expected exactly one vps_init_tool*.sh, found $vps_count"
 
-check_contains vps_init_tool.sh 'TOOL_VERSION="1\.3\.0"' 'vps_init_tool.sh version drifted'
+check_contains vps_init_tool.sh 'TOOL_VERSION="1\.3\.1"' 'vps_init_tool.sh version drifted'
 check_ascii_only vps_init_tool.sh 'vps_init_tool.sh must stay ASCII-only for portable terminal output'
 check_not_contains vps_init_tool.sh '"\): \$\(current_ssh_ports\)\)"\)' 'vps_init_tool.sh must not duplicate SSH port text after m()'
 check_not_contains vps_init_tool.sh "'\) before UFW changes to avoid locking you out\." 'vps_init_tool.sh must not duplicate UFW lockout text after m()'
@@ -133,7 +133,7 @@ ui_main_output="$(
   VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never COLUMNS=52 \
     bash -c 'source ./vps_init_tool.sh; main_menu' <<< '0'
 )"
-grep -Fq 'VPS Init Tool 1.3.0' <<< "$ui_main_output" || fail 'vps_init_tool.sh interactive entry did not render the versioned main menu'
+grep -Fq 'VPS Init Tool 1.3.1' <<< "$ui_main_output" || fail 'vps_init_tool.sh interactive entry did not render the versioned main menu'
 grep -Fq '[At a glance]' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the system status strip'
 grep -Fq 'Optimization assessment / guided setup' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the recommended starting action'
 grep -Fq 'Security and access' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render grouped navigation'
@@ -251,8 +251,10 @@ check_contains vps_init_tool.sh 'ZRAM tools activation failed\. Restoring the pr
 check_contains vps_init_tool.sh 'restore_managed_file "\$config_file" "\$config_backup"' 'vps_init_tool.sh ZRAM backends must restore previous managed configuration on failure'
 check_not_contains vps_init_tool.sh 'setup_zram_generator \|\| \{ stop_known_zram_services; setup_zram_fallback; \}' 'vps_init_tool.sh must not layer fallback ZRAM over a failed generator backend'
 check_not_contains vps_init_tool.sh 'setup_zram_tools "\$size_hint" \|\| \{ stop_known_zram_services; setup_zram_fallback; \}' 'vps_init_tool.sh must not layer fallback ZRAM over failed zram-tools'
-check_contains vps_init_tool.sh 'setup_zram_generator \|\| return 1' 'vps_init_tool.sh must propagate zram-generator activation failure'
+check_contains vps_init_tool.sh 'setup_zram_generator "\$zram_was_active" \|\| return 1' 'vps_init_tool.sh must propagate zram-generator activation failure'
 check_contains vps_init_tool.sh 'setup_zram_tools "\$size_hint" \|\| return 1' 'vps_init_tool.sh must propagate zram-tools activation failure'
+check_contains vps_init_tool.sh 'normalize_zram_generator_size\(\)' 'vps_init_tool.sh must normalize zram-generator size syntax'
+check_not_contains vps_init_tool.sh 'min\(ram / 2, 1024M\)' 'vps_init_tool.sh must not suggest SI suffixes inside zram-generator expressions'
 check_contains vps_init_tool.sh '--baseline' 'vps_init_tool.sh missing low-risk baseline CLI'
 check_contains vps_init_tool.sh '--preflight' 'vps_init_tool.sh missing read-only preflight CLI'
 check_contains vps_init_tool.sh 'preflight_check\(\)' 'vps_init_tool.sh missing read-only preflight helper'
@@ -557,6 +559,13 @@ VPS_INIT_LIB_ONLY=1
 # shellcheck source=vps_init_tool.sh
 source ./vps_init_tool.sh
 unset VPS_INIT_LIB_ONLY
+
+[ "$(normalize_zram_generator_size 512M)" = "512" ] || fail 'zram-generator normalization mishandled an M size'
+[ "$(normalize_zram_generator_size 2G)" = "2048" ] || fail 'zram-generator normalization mishandled a G size'
+[ "$(normalize_zram_generator_size 'ram / 2')" = "ram / 2" ] || fail 'zram-generator normalization changed a valid expression'
+expect_rc 1 normalize_zram_generator_size 'min(ram / 2, 1024M)'
+zram_small_recommendation="$(get_mem_mb() { echo 442; }; recommend_zram_size)"
+[ "$zram_small_recommendation" = "221M" ] || fail "small VPS ZRAM recommendation exceeded half of RAM: $zram_small_recommendation"
 
 modprobe() { fail 'bbr_available_readonly must not load kernel modules'; }
 bbr_available_readonly >/dev/null 2>&1 || true

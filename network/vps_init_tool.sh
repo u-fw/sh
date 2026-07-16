@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # Scope: memory, SSH, UFW firewall, Fail2ban, DNS, logs, basic network tuning.
 # Principle: audit first, confirm before risky changes.
 
-TOOL_VERSION="1.3.0"
+TOOL_VERSION="1.3.1"
 SCRIPT_NAME="VPS Init Tool"
 BACKUP_ROOT="/root/vps-init-backups"
 SWAPFILE="/swapfile"
@@ -441,6 +441,22 @@ parse_size_to_mb() {
   return 1
 }
 
+normalize_zram_generator_size() {
+  local value="$1"
+
+  if valid_size_mb_gb "$value"; then
+    parse_size_to_mb "$value"
+    return
+  fi
+
+  # zram-generator expressions use bare numbers as MiB. Unit suffixes inside
+  # expressions are SI multipliers, so values such as 1024M are dangerously large.
+  [ -n "$value" ] || return 1
+  [[ "$value" =~ ^[[:space:]0-9A-Za-z_.,()+*/%^-]+$ ]] || return 1
+  [[ "$value" =~ [0-9][KkMmGgTt] ]] && return 1
+  printf '%s\n' "$value"
+}
+
 valid_port() {
   [[ "${1:-}" =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535))
 }
@@ -610,7 +626,7 @@ recommend_swap_size() {
 }
 
 recommend_zram_size() {
-  local mem_mb rec_mb
+  local mem_mb rec_mb max_rec_mb
   mem_mb="$(get_mem_mb)"
   if [ "$mem_mb" -le 1024 ]; then rec_mb=512
   elif [ "$mem_mb" -le 2048 ]; then rec_mb=1024
@@ -618,6 +634,9 @@ recommend_zram_size() {
   elif [ "$mem_mb" -le 8192 ]; then rec_mb=2048
   else rec_mb=4096
   fi
+  max_rec_mb=$((mem_mb / 2))
+  if [ "$rec_mb" -gt "$max_rec_mb" ]; then rec_mb="$max_rec_mb"; fi
+  if [ "$rec_mb" -lt 1 ]; then rec_mb=1; fi
   echo "${rec_mb}M"
 }
 
@@ -1053,10 +1072,17 @@ stop_known_zram_services() {
 }
 
 setup_zram_generator() {
-  local size_expr algo config_file="/etc/systemd/zram-generator.conf" config_backup="" config_tmp=""
-  size_expr="$(input_default "$(m 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)' 'ZRAM size/expression, e.g. 512M / 2G / ram / 2 / min(ram / 2, 1024M)')" "$(recommend_zram_size)")"
+  local restart_previous="${1:-0}" size_input size_expr algo config_file="/etc/systemd/zram-generator.conf" config_backup="" config_tmp=""
+  size_input="$(input_default "$(m 'ZRAM size in MiB or expression, e.g. 512 / 2G / ram / 2 / min(ram / 2, 1024)' 'ZRAM size in MiB or expression, e.g. 512 / 2G / ram / 2 / min(ram / 2, 1024)')" "ram / 2")"
+  if ! size_expr="$(normalize_zram_generator_size "$size_input")"; then
+    red "$(m 'Invalid ZRAM size. Use a bare MiB value, a standalone M/G size, or an expression with bare MiB numbers.' 'Invalid ZRAM size. Use a bare MiB value, a standalone M/G size, or an expression with bare MiB numbers.')"
+    return 1
+  fi
   algo="$(input_default "$(m 'Compression algorithm' 'Compression algorithm')" "zstd")"
   apt_install systemd-zram-generator || return 1
+  # Package installation may activate the generator defaults before our local
+  # configuration exists. Stop that transient device before applying the file.
+  stop_known_zram_services
   mkdir -p /etc/systemd || return 1
   backup_path "$config_file" >/dev/null || return 1
   config_backup="$BACKUP_LAST_PATH"
@@ -1075,13 +1101,14 @@ EOF2
   mv -f -- "$config_tmp" "$config_file" || { cleanup_files "$config_tmp"; return 1; }
   if ! systemctl daemon-reload || ! { systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || systemctl start systemd-zram-setup@zram0.service; }; then
     red "$(m 'ZRAM generator activation failed. Restoring the previous configuration.' 'ZRAM generator activation failed. Restoring the previous configuration.')"
+    status_info "$(m 'Inspect with: systemctl status systemd-zram-setup@zram0.service; journalctl -u systemd-zram-setup@zram0.service -n 50 --no-pager' 'Inspect with: systemctl status systemd-zram-setup@zram0.service; journalctl -u systemd-zram-setup@zram0.service -n 50 --no-pager')"
     systemctl stop systemd-zram-setup@zram0.service 2>/dev/null || true
     if ! restore_managed_file "$config_file" "$config_backup"; then
       status_bad "$(m 'Failed to restore the previous ZRAM generator configuration.' 'Failed to restore the previous ZRAM generator configuration.')"
       return 1
     fi
     systemctl daemon-reload || status_warn "$(m 'Failed to reload systemd after ZRAM generator rollback.' 'Failed to reload systemd after ZRAM generator rollback.')"
-    if [ -n "$config_backup" ]; then
+    if [ -n "$config_backup" ] || [ "$restart_previous" -eq 1 ]; then
       systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || status_warn "$(m 'Previous ZRAM generator configuration was restored but could not be restarted.' 'Previous ZRAM generator configuration was restored but could not be restarted.')"
     fi
     return 1
@@ -1176,17 +1203,18 @@ EOF2
 }
 
 setup_zram() {
-  local enable size_hint
+  local enable size_hint zram_was_active=0
   enable="$(input_yes_no "$(m 'Enable/configure ZRAM?' 'Enable/configure ZRAM?')" "yes")" || return 1
   [ "$enable" = "yes" ] || { yellow "$(m 'ZRAM skipped.' 'ZRAM skipped.')"; return 0; }
   is_systemd || { red "$(m 'systemd not detected. ZRAM auto-start setup skipped.' 'systemd not detected. ZRAM auto-start setup skipped.')"; return 1; }
   zram_supported || { red "$(m 'ZRAM not supported by this kernel/VPS layer.' 'ZRAM not supported by this kernel/VPS layer.')"; return 1; }
 
+  if swapon --show --noheadings 2>/dev/null | grep -q '/zram'; then zram_was_active=1; fi
   size_hint="$(recommend_zram_size)"
   apt_update_once || return 1
   if apt-cache show systemd-zram-generator >/dev/null 2>&1; then
     stop_known_zram_services
-    setup_zram_generator || return 1
+    setup_zram_generator "$zram_was_active" || return 1
   elif apt-cache show zram-tools >/dev/null 2>&1; then
     stop_known_zram_services
     setup_zram_tools "$size_hint" || return 1
