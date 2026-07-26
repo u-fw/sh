@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016
+# File-level suppressions, all inherent to what a test harness looks like:
+#   SC2016 - single-quoted '$...' inside assertion patterns is intentional.
+#   SC2034 - variables are set for the scripts this suite sources, not for use here.
+#   SC2317 - stub/mock functions are invoked indirectly by the code under test.
+#   SC1091 - sourced scripts are resolved at runtime from the repo root.
+# shellcheck disable=SC2016,SC2034,SC2317,SC1091
 set -Eeuo pipefail
+
+# Some assertions need a tool or a filesystem capability that is not available
+# everywhere (jq, shellcheck, POSIX mode bits under Git Bash on NTFS). Announce
+# what did not run instead of quietly reporting a pass, and let CI set
+# VERIFY_STRICT=1 so that "could not check" counts as a failure.
+verify_skip() {
+  local what="$1" why="$2"
+  if [ "${VERIFY_STRICT:-0}" = "1" ]; then
+    fail "$what could not run ($why) and VERIFY_STRICT=1"
+  fi
+  printf '[SKIP] %s (%s)\n' "$what" "$why"
+}
 
 fail() {
   printf '[FAIL] %s\n' "$*" >&2
@@ -43,7 +60,7 @@ done
 vps_count="$(find . -maxdepth 1 -type f -name 'vps_init_tool*.sh' | wc -l | awk '{print $1}')"
 [ "$vps_count" = "1" ] || fail "expected exactly one vps_init_tool*.sh, found $vps_count"
 
-check_contains vps_init_tool.sh 'TOOL_VERSION="1\.3\.1"' 'vps_init_tool.sh version drifted'
+check_contains vps_init_tool.sh 'TOOL_VERSION="1\.4\.0"' 'vps_init_tool.sh version drifted'
 check_ascii_only vps_init_tool.sh 'vps_init_tool.sh must stay ASCII-only for portable terminal output'
 check_not_contains vps_init_tool.sh '"\): \$\(current_ssh_ports\)\)"\)' 'vps_init_tool.sh must not duplicate SSH port text after m()'
 check_not_contains vps_init_tool.sh "'\) before UFW changes to avoid locking you out\." 'vps_init_tool.sh must not duplicate UFW lockout text after m()'
@@ -110,8 +127,9 @@ check_contains vps_init_tool.sh '--list-backups\) list_backups ;;' 'vps_init_too
 check_contains vps_init_tool.sh 'ufw_parse_cloudflare_ports "\$UFW_CF_PORTS" \|\| \{ red "Invalid --ports value: \$UFW_CF_PORTS"; show_help; exit 2; \}' 'vps_init_tool.sh CLI must validate --ports before running Cloudflare sync'
 check_contains vps_init_tool.sh 'comma-separated single ports only, no ranges' 'vps_init_tool.sh help must explain --ports format'
 check_contains vps_init_tool.sh 'Missing value for --lang' 'vps_init_tool.sh CLI must report a missing --lang value'
-check_contains vps_init_tool.sh 'cn currently uses English output' 'vps_init_tool.sh help must explain cn compatibility behavior'
-check_contains vps_init_tool.sh 'zh\|zh-cn\|zh_CN\|cn\|CN\|chinese\|Chinese\) echo "en" ;;' 'vps_init_tool.sh Chinese language aliases must normalize to English-safe output'
+check_contains vps_init_tool.sh 'Deprecated no-op, accepted for compatibility' 'vps_init_tool.sh help must document --lang as a deprecated no-op'
+check_not_contains vps_init_tool.sh '^m\(\) \{' 'vps_init_tool.sh must not reintroduce the unreachable i18n wrapper'
+check_not_contains vps_init_tool.sh 'normalize_lang' 'vps_init_tool.sh must not reintroduce the unreachable language normalizer'
 check_not_contains vps_init_tool.sh 'language_menu\(\)' 'vps_init_tool.sh must not expose a fake language switch in the interactive UI'
 check_contains vps_init_tool.sh 'ui_init\(\)' 'vps_init_tool.sh missing terminal color initialization'
 check_contains vps_init_tool.sh 'NO_COLOR' 'vps_init_tool.sh must honor the NO_COLOR convention'
@@ -133,7 +151,7 @@ ui_main_output="$(
   VPS_INIT_LIB_ONLY=1 VPS_INIT_COLOR=never COLUMNS=52 \
     bash -c 'source ./vps_init_tool.sh; main_menu' <<< '0'
 )"
-grep -Fq 'VPS Init Tool 1.3.1' <<< "$ui_main_output" || fail 'vps_init_tool.sh interactive entry did not render the versioned main menu'
+grep -Fq 'VPS Init Tool 1.4.0' <<< "$ui_main_output" || fail 'vps_init_tool.sh interactive entry did not render the versioned main menu'
 grep -Fq '[At a glance]' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the system status strip'
 grep -Fq 'Optimization assessment / guided setup' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render the recommended starting action'
 grep -Fq 'Security and access' <<< "$ui_main_output" || fail 'vps_init_tool.sh main menu did not render grouped navigation'
@@ -169,13 +187,13 @@ check_contains vps_init_tool.sh 'log_action\(\)' 'vps_init_tool.sh missing opera
 check_contains vps_init_tool.sh 'restore_managed_file\(\)' 'vps_init_tool.sh missing managed configuration rollback helper'
 check_contains vps_init_tool.sh 'require_systemd\(\)' 'vps_init_tool.sh missing systemd requirement helper'
 check_contains vps_init_tool.sh 'systemd is required for this module' 'vps_init_tool.sh systemd helper must explain unsupported service modules'
-check_not_contains vps_init_tool.sh 'is_systemd \|\| \{ red "\$\(m '\''systemd not detected\.'\''' 'vps_init_tool.sh service modules must use require_systemd helper'
+check_not_contains vps_init_tool.sh 'is_systemd \|\| \{ red "systemd not detected\.' 'vps_init_tool.sh service modules must use require_systemd helper'
 check_contains vps_init_tool.sh 'normalize_yes_no\(\)' 'vps_init_tool.sh missing y/n normalization helper'
 check_contains vps_init_tool.sh 'input_yes_no\(\)' 'vps_init_tool.sh missing y/n compatible yes/no prompt helper'
 check_contains vps_init_tool.sh 'normalize_password_policy\(\)' 'vps_init_tool.sh missing y/n compatible SSH password policy helper'
 check_contains vps_init_tool.sh 'valid_permit_root_login\(\)' 'vps_init_tool.sh missing PermitRootLogin validator'
 check_contains vps_init_tool.sh 'yes\|prohibit-password\|without-password\|forced-commands-only\|no' 'vps_init_tool.sh PermitRootLogin validator must allow only OpenSSH policies'
-check_contains vps_init_tool.sh 'valid_permit_root_login "\$permit_root" \|\| \{ red "\$\(m '\''Invalid PermitRootLogin policy\. Use yes, prohibit-password, forced-commands-only, no, or without-password\.'\''' 'vps_init_tool.sh must validate PermitRootLogin before writing SSH hardening'
+check_contains vps_init_tool.sh 'valid_permit_root_login "\$permit_root" \|\| \{ red "Invalid PermitRootLogin policy\.' 'vps_init_tool.sh must validate PermitRootLogin before writing SSH hardening'
 check_contains vps_init_tool.sh 'valid_allow_users_value\(\)' 'vps_init_tool.sh missing AllowUsers validator'
 check_contains vps_init_tool.sh 'valid_allow_users_value "\$allow_user".*Invalid AllowUsers value' 'vps_init_tool.sh must validate AllowUsers before writing SSH hardening'
 check_contains vps_init_tool.sh 'ssh_effective_value_from_text\(\)' 'vps_init_tool.sh missing effective sshd value parser'
@@ -285,10 +303,10 @@ check_contains vps_init_tool.sh 'ufw_cf_lock_release\(\)' 'vps_init_tool.sh miss
 check_contains vps_init_tool.sh 'flock -u "\$UFW_CF_LOCK_FD"' 'vps_init_tool.sh Cloudflare UFW lock release must unlock fd'
 check_contains vps_init_tool.sh 'exec \{UFW_CF_LOCK_FD\}>&-' 'vps_init_tool.sh Cloudflare UFW lock release must close fd'
 check_contains vps_init_tool.sh 'ufw_cf_lock_release' 'vps_init_tool.sh Cloudflare UFW sync must release lock explicitly'
-check_contains vps_init_tool.sh 'ufw_cf_lock_acquire || return 1' 'vps_init_tool.sh Cloudflare UFW sync must acquire lock before mutating rules'
+check_contains vps_init_tool.sh 'ufw_cf_lock_acquire \|\| return 1' 'vps_init_tool.sh Cloudflare UFW sync must acquire lock before mutating rules'
 check_contains vps_init_tool.sh 'ufw_cf_sync_cleanup\(\)' 'vps_init_tool.sh missing Cloudflare UFW sync RETURN cleanup helper'
 check_contains vps_init_tool.sh 'cleanup_files "\$@"' 'vps_init_tool.sh Cloudflare UFW cleanup helper must use explicit path arguments'
-check_contains vps_init_tool.sh 'local ports desired="" current="" adds="" deletes=""' 'vps_init_tool.sh Cloudflare UFW temp paths must initialize empty before cleanup'
+check_contains vps_init_tool.sh 'local .*desired="" current="" adds="" deletes=""' 'vps_init_tool.sh Cloudflare UFW temp paths must initialize empty before cleanup'
 check_contains vps_init_tool.sh 'ufw_ensure_ssh_access \|\| \{ ufw_cf_sync_cleanup "\$desired"' 'vps_init_tool.sh must cleanup Cloudflare UFW sync if SSH allow check fails'
 check_contains vps_init_tool.sh 'cf_fetch_ranges \|\| \{ ufw_cf_sync_cleanup "\$desired"' 'vps_init_tool.sh must cleanup Cloudflare UFW sync if Cloudflare ranges fetch fails'
 check_contains vps_init_tool.sh 'desired="\$\(mktemp\)" \|\| \{ ufw_cf_sync_cleanup "\$desired"' 'vps_init_tool.sh Cloudflare UFW sync must cleanup if desired temp creation fails'
@@ -326,7 +344,7 @@ check_contains vps_init_tool.sh 'ssh-keygen -l -f' 'vps_init_tool.sh must valida
 check_contains vps_init_tool.sh 'valid_ssh_public_key "\$key"' 'vps_init_tool.sh must validate SSH public keys before installing'
 check_contains vps_init_tool.sh 'group="\$\(id -gn "\$user" 2>/dev/null \|\| echo "\$user"\)"' 'vps_init_tool.sh must chown SSH keys using the user primary group'
 check_contains vps_init_tool.sh 'SSH_CONNECTION' 'vps_init_tool.sh must include the current SSH session port when protecting firewall access'
-check_contains vps_init_tool.sh 'ufw_ensure_ssh_access \|\| \{ ssh_restore_hardening_backup "\$fragment_backup"; return 1; \}' 'vps_init_tool.sh SSH hardening must protect current SSH ports before reload'
+check_contains vps_init_tool.sh 'ufw_ensure_ssh_access \|\| \{ ssh_restore_hardening_backup "\$fragment_backup"' 'vps_init_tool.sh SSH hardening must protect current SSH ports before reload'
 check_contains vps_init_tool.sh 'SSH firewall allow failed' 'vps_init_tool.sh must abort SSH hardening if the firewall rule cannot be added'
 check_not_contains vps_init_tool.sh 'if has_cmd ufw; then ufw allow "\$port/tcp" comment "SSH" \|\| true; fi' 'vps_init_tool.sh must not ignore SSH firewall allow failures'
 check_contains vps_init_tool.sh 'SSH service reload/restart failed' 'vps_init_tool.sh must report failed SSH activation'
@@ -376,7 +394,7 @@ check_contains vps_init_tool.sh 'Swapfile size verification failed' 'vps_init_to
 check_contains vps_init_tool.sh 'valid_ip_literal "\$ip"' 'vps_init_tool.sh must validate Fail2ban unban IP addresses'
 check_contains vps_init_tool.sh 'Invalid IP to unban' 'vps_init_tool.sh must report invalid Fail2ban unban IP addresses'
 
-check_contains freedom.sh 'SCRIPT_VERSION="v10\.2-xray"' 'freedom.sh version drifted'
+check_contains freedom.sh 'SCRIPT_VERSION="v10\.3-xray"' 'freedom.sh version drifted'
 check_contains freedom.sh 'DEFAULT_SNI="v1-dy\.ixigua\.com"' 'freedom.sh default SNI drifted'
 check_contains freedom.sh 'ipv6_is_non_global\(\)' 'freedom.sh missing precise non-global IPv6 classifier'
 check_contains freedom.sh 'first_value >= 16#fe80 && first_value <= 16#febf' 'freedom.sh must cover the complete IPv6 link-local fe80::/10 range'
@@ -723,17 +741,34 @@ if ssh_verify_hardening_effective 2200 no prohibit-password yes yes 'admin deplo
 fi
 unset -f sshd
 
-ssh_permissions_tmp="$(mktemp -d)"
-chmod 700 "$ssh_permissions_tmp"
-touch "$ssh_permissions_tmp/authorized_keys"
-chmod 600 "$ssh_permissions_tmp/authorized_keys"
-ssh_path_secure_for_user "$ssh_permissions_tmp/authorized_keys" "$(id -un)" \
-  || fail 'ssh_path_secure_for_user rejected secure key-file permissions'
-chmod 666 "$ssh_permissions_tmp/authorized_keys"
-if ssh_path_secure_for_user "$ssh_permissions_tmp/authorized_keys" "$(id -un)"; then
-  fail 'ssh_path_secure_for_user accepted a group/world-writable key file'
+# These assertions need a filesystem that actually stores POSIX mode bits.
+# Under Git Bash/MSYS on NTFS chmod is a no-op (600 and 666 both read back as
+# 644), so run them only where the mode round-trips, and say so when skipping
+# rather than silently reporting a pass.
+fs_preserves_mode_bits() {
+  local probe mode
+  probe="$(mktemp)" || return 1
+  chmod 600 "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
+  mode="$(stat -c %a "$probe" 2>/dev/null || echo '')"
+  rm -f "$probe"
+  [ "$mode" = "600" ]
+}
+
+if fs_preserves_mode_bits; then
+  ssh_permissions_tmp="$(mktemp -d)"
+  chmod 700 "$ssh_permissions_tmp"
+  touch "$ssh_permissions_tmp/authorized_keys"
+  chmod 600 "$ssh_permissions_tmp/authorized_keys"
+  ssh_path_secure_for_user "$ssh_permissions_tmp/authorized_keys" "$(id -un)" \
+    || fail 'ssh_path_secure_for_user rejected secure key-file permissions'
+  chmod 666 "$ssh_permissions_tmp/authorized_keys"
+  if ssh_path_secure_for_user "$ssh_permissions_tmp/authorized_keys" "$(id -un)"; then
+    fail 'ssh_path_secure_for_user accepted a group/world-writable key file'
+  fi
+  rm -rf "$ssh_permissions_tmp"
+else
+  verify_skip 'SSH key permission checks' 'filesystem does not preserve mode bits'
 fi
-rm -rf "$ssh_permissions_tmp"
 
 (
   user_has_authorized_key() { [ "$1" = "root" ]; }
@@ -837,11 +872,14 @@ bash ./vps_init_tool.sh --doctor >/dev/null || fail 'vps_init_tool.sh --doctor f
 bash ./vps_init_tool.sh --optimize-check >/dev/null || fail 'vps_init_tool.sh --optimize-check failed'
 bash ./vps_init_tool.sh --updates-audit >/dev/null || fail 'vps_init_tool.sh --updates-audit failed'
 
-freedom_lib="$(mktemp)"
-trap 'rm -f "$freedom_lib"' EXIT
-sed '/^handle_cli "\$@"/,$d' freedom.sh > "$freedom_lib"
-# shellcheck source=/dev/null
-source "$freedom_lib"
+# Source freedom.sh for its helpers via its own library guard. The previous
+# approach text-stripped the entry point with sed, which fails open: if those
+# lines ever move or get indented, sed removes nothing and sourcing runs a real
+# deployment inside the test run.
+FREEDOM_LIB_ONLY=1
+# shellcheck source=freedom.sh
+source ./freedom.sh
+unset FREEDOM_LIB_ONLY
 if ip_to_int 08.8.8.8 >/dev/null 2>&1; then fail 'freedom.sh ip_to_int accepted ambiguous leading-zero IPv4'; fi
 if validate_link_host 08.8.8.8 >/dev/null 2>&1; then fail 'freedom.sh validate_link_host accepted ambiguous leading-zero IPv4'; fi
 validate_link_host 1.2.3.4 || fail 'freedom.sh validate_link_host rejected IPv4'
@@ -861,7 +899,13 @@ Certificate chain's total length: 3688 (certs count: 3)"
 [ "$(tls_ping_sni_chain_length "$tls_ping_sample")" = "3688" ] || fail 'freedom.sh failed to parse Xray TLS ping SNI chain length'
 tls_ping_sni_has_pq_kex "$tls_ping_sample" || fail 'freedom.sh failed to parse Xray TLS ping post-quantum KEX result'
 if tls_ping_sni_has_pq_kex "${tls_ping_sample/true/false}"; then fail 'freedom.sh treated a non-PQ REALITY target as post-quantum'; fi
-[ "$(parse_asn_response '{"asn":13335,"asn_organization":"Cloudflare, Inc."}')" = '13335|Cloudflare, Inc.' ] || fail 'freedom.sh failed to parse ASN lookup response'
+if command -v jq >/dev/null 2>&1; then
+  [ "$(parse_asn_response '{"asn":13335,"asn_organization":"Cloudflare, Inc."}')" = '13335|Cloudflare, Inc.' ] || fail 'freedom.sh failed to parse ASN lookup response'
+  [ -z "$(parse_asn_response '{"asn":"","asn_organization":"x"}')" ] || fail 'freedom.sh accepted an ASN response with an empty asn field'
+  [ "$(parse_asn_response '{"asn":64500}')" = '64500|unknown' ] || fail 'freedom.sh did not fall back to unknown for a missing organization'
+else
+  verify_skip 'freedom.sh ASN response parsing' 'jq is not installed'
+fi
 reality_port_is_standard 443 || fail 'freedom.sh must accept REALITY TCP/443 as standard'
 if reality_port_is_standard 8443; then fail 'freedom.sh treated non-443 REALITY port as standard'; fi
 if (DEPLOY_MODE=reality; PORT=8443; NONINTERACTIVE=1; ALLOW_NONSTANDARD_REALITY_PORT=0; enforce_reality_port_policy) >/dev/null 2>&1; then
@@ -920,31 +964,69 @@ XHTTP_PATH=/cdn-test
 XHTTP_CLIENT_ALPN_JSON='["h2","http/1.1"]'
 VLESS_ENC=none
 NODE_NAME=test-node
-cdn_link="$(build_link)"
-printf '%s\n' "$cdn_link" | grep -q 'type=xhttp' || fail 'freedom.sh CDN link missing type=xhttp'
-printf '%s\n' "$cdn_link" | grep -q 'security=tls' || fail 'freedom.sh CDN link missing security=tls'
-printf '%s\n' "$cdn_link" | grep -q 'path=%2Fcdn-test' || fail 'freedom.sh CDN link must URL-encode XHTTP path'
-printf '%s\n' "$cdn_link" | grep -q 'alpn=h2%2Chttp%2F1.1' || fail 'freedom.sh CDN link must URL-encode ALPN list'
-printf '%s\n' "$cdn_link" | grep -q 'mode=auto' || fail 'freedom.sh CDN link missing mode=auto'
-printf '%s\n' "$cdn_link" | grep -q 'flow=xtls-rprx-vision' || fail 'freedom.sh CDN link missing Vision flow'
-XHTTP_CLIENT_ALPN_JSON='["h3"]'
-cdn_h3_link="$(build_link)"
-printf '%s\n' "$cdn_h3_link" | grep -q 'alpn=h3' || fail 'freedom.sh CDN-H3 link must request H3 at the client/CDN edge'
+# build_link URL-encodes through `jq @uri`, so these need jq present.
+if command -v jq >/dev/null 2>&1; then
+  cdn_link="$(build_link)"
+  printf '%s\n' "$cdn_link" | grep -q 'type=xhttp' || fail 'freedom.sh CDN link missing type=xhttp'
+  printf '%s\n' "$cdn_link" | grep -q 'security=tls' || fail 'freedom.sh CDN link missing security=tls'
+  printf '%s\n' "$cdn_link" | grep -q 'path=%2Fcdn-test' || fail 'freedom.sh CDN link must URL-encode XHTTP path'
+  printf '%s\n' "$cdn_link" | grep -q 'alpn=h2%2Chttp%2F1.1' || fail 'freedom.sh CDN link must URL-encode ALPN list'
+  printf '%s\n' "$cdn_link" | grep -q 'mode=auto' || fail 'freedom.sh CDN link missing mode=auto'
+  printf '%s\n' "$cdn_link" | grep -q 'flow=xtls-rprx-vision' || fail 'freedom.sh CDN link missing Vision flow'
+  XHTTP_CLIENT_ALPN_JSON='["h3"]'
+  cdn_h3_link="$(build_link)"
+  printf '%s\n' "$cdn_h3_link" | grep -q 'alpn=h3' || fail 'freedom.sh CDN-H3 link must request H3 at the client/CDN edge'
+else
+  verify_skip 'freedom.sh share-link construction' 'jq is not installed'
+fi
 
+# Needs openssl to actually mint a certificate. Under MSYS the '/CN=...' value
+# is rewritten as a Windows path before openssl sees it, so probe by result
+# rather than by `command -v openssl`.
 cert_dir="$(mktemp -d)"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=cdn.example.com' -addext 'subjectAltName=DNS:other.example.com' \
-  -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1
-if cert_covers_domain "$cert_dir/cert.pem" cdn.example.com; then
-  fail 'freedom.sh certificate matcher ignored a conflicting SAN and fell back to CN'
+  -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1 || true
+if [ -s "$cert_dir/cert.pem" ]; then
+  if cert_covers_domain "$cert_dir/cert.pem" cdn.example.com; then
+    fail 'freedom.sh certificate matcher ignored a conflicting SAN and fell back to CN'
+  fi
+  cert_covers_domain "$cert_dir/cert.pem" other.example.com || fail 'freedom.sh certificate matcher rejected matching SAN'
+  TLS_CERT_FILE="$cert_dir/cert.pem"
+  TLS_KEY_FILE="$cert_dir/key.pem"
+  TLS_CERT_MODE=cloudflare-origin
+  SNI=''
+  check_tls_cert_files other.example.com || fail 'freedom.sh explicit certificate domain check failed'
+else
+  verify_skip 'freedom.sh TLS certificate matching' 'openssl could not generate a test certificate here'
 fi
-cert_covers_domain "$cert_dir/cert.pem" other.example.com || fail 'freedom.sh certificate matcher rejected matching SAN'
-TLS_CERT_FILE="$cert_dir/cert.pem"
-TLS_KEY_FILE="$cert_dir/key.pem"
-TLS_CERT_MODE=cloudflare-origin
-SNI=''
-check_tls_cert_files other.example.com || fail 'freedom.sh explicit certificate domain check failed'
 rm -rf "$cert_dir"
+
+# download_and_run_installer must propagate the installer's own exit status.
+# `$?` sampled after a failed `if` block is the status of the `if` compound
+# (which is 0), so the earlier implementation reported every installer failure
+# as a success and the caller's `|| fatal ...` never fired.
+(
+  curl() {
+    local out=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-o" ]; then out="${2:-}"; fi
+      shift
+    done
+    [ -n "$out" ] || return 1
+    : > "$out"
+  }
+  installer_fails() { return 7; }
+  installer_succeeds() { return 0; }
+
+  rc=0
+  download_and_run_installer 'https://example.invalid/install.sh' installer_fails 'Test' || rc=$?
+  [ "$rc" -eq 7 ] || exit 1
+
+  rc=0
+  download_and_run_installer 'https://example.invalid/install.sh' installer_succeeds 'Test' || rc=$?
+  [ "$rc" -eq 0 ] || exit 1
+) || fail 'freedom.sh download_and_run_installer did not propagate the installer exit status'
 
 rollback_dir="$(mktemp -d)"
 CONFIG_PATH="$rollback_dir/config.json"
@@ -983,11 +1065,108 @@ expect_rc 2 bash ./freedom.sh --route-profile invalid
 expect_rc 2 bash ./freedom.sh --allow-nonstandard-reality-port=value
 expect_rc 2 bash ./freedom.sh --update-xray=value
 
+# ---------- regression tests for previously shipped defects ----------
+
+# A pattern that also matches unrelated text asserts nothing. This caught an
+# unescaped '||' which ERE read as an alternation with an empty branch, making
+# the Cloudflare lock-ordering check impossible to fail.
+vacuous_probe="$(mktemp)"
+printf 'hello world\nthe quick brown fox\n1234567890\n' > "$vacuous_probe"
+vacuous_found=0
+while IFS= read -r assertion_line; do
+  case "$assertion_line" in
+    check_contains*|check_not_contains*) ;;
+    *) continue ;;
+  esac
+  eval "set -- ${assertion_line#check_*contains }" 2>/dev/null || continue
+  [ -n "${2:-}" ] || continue
+  if grep -Eq -- "$2" "$vacuous_probe" 2>/dev/null; then
+    printf '[FAIL] assertion pattern matches unrelated text: %s\n' "$2" >&2
+    vacuous_found=1
+  fi
+done < verify.sh
+rm -f "$vacuous_probe"
+[ "$vacuous_found" -eq 0 ] || fail 'verify.sh contains a pattern that can never fail'
+
+# set_diff_file must report every desired rule as an add when no state exists.
+# The previous awk NR==FNR implementation returned zero adds for an empty
+# exclude file, so a fresh host got no Cloudflare rules while reporting success.
+diff_tmp="$(mktemp -d)"
+printf '173.245.48.0/20\t443\n103.21.244.0/22\t443\n104.16.0.0/13\t443\n' > "$diff_tmp/desired"
+: > "$diff_tmp/empty"
+set_diff_file "$diff_tmp/empty" "$diff_tmp/desired" "$diff_tmp/out"
+[ "$(wc -l < "$diff_tmp/out")" -eq 3 ] || fail 'set_diff_file dropped adds when the exclude file was empty'
+printf '173.245.48.0/20\t443\n' > "$diff_tmp/partial"
+set_diff_file "$diff_tmp/partial" "$diff_tmp/desired" "$diff_tmp/out"
+[ "$(wc -l < "$diff_tmp/out")" -eq 2 ] || fail 'set_diff_file mis-computed adds against a partial state file'
+set_diff_file "$diff_tmp/desired" "$diff_tmp/desired" "$diff_tmp/out"
+[ "$(wc -l < "$diff_tmp/out")" -eq 0 ] || fail 'set_diff_file reported adds when state already matched'
+rm -rf "$diff_tmp"
+
+# The /etc/fstab swap guard must match the exact line setup_swapfile appends,
+# and must not match an unrelated entry that merely mounts onto that path. Pull
+# the real pattern and the real appended line out of the script rather than
+# restating them here, or this only tests a copy of itself.
+fstab_guard_pattern="$(sed -n 's/.*grep -qE "\(\^[^"]*\)" \/etc\/fstab.*/\1/p' vps_init_tool.sh | head -n1)"
+[ -n "$fstab_guard_pattern" ] || fail 'could not locate the /etc/fstab swap guard pattern in vps_init_tool.sh'
+eval "fstab_guard_pattern=\"$fstab_guard_pattern\""
+fstab_appended_line="$(sed -n 's/.*echo "\(\$SWAPFILE [^"]*\)" >> \/etc\/fstab.*/\1/p' vps_init_tool.sh | head -n1)"
+[ -n "$fstab_appended_line" ] || fail 'could not locate the /etc/fstab swap line written by vps_init_tool.sh'
+eval "fstab_appended_line=\"$fstab_appended_line\""
+
+fstab_probe="$(mktemp)"
+printf '%s\n' "$fstab_appended_line" > "$fstab_probe"
+grep -qE "$fstab_guard_pattern" "$fstab_probe" \
+  || fail 'fstab swap guard does not match the line the tool itself appends (it would duplicate the entry on every run)'
+printf '/swapfile swap swap defaults 0 0\n' > "$fstab_probe"
+grep -qE "$fstab_guard_pattern" "$fstab_probe" \
+  || fail 'fstab swap guard does not match a pre-existing distro swap entry'
+printf '/dev/sdb1 %s ext4 defaults 0 0\n' "$SWAPFILE" > "$fstab_probe"
+if grep -qE "$fstab_guard_pattern" "$fstab_probe"; then
+  fail 'fstab swap guard matched an unrelated entry using the swapfile path as a mount point'
+fi
+printf '# %s none swap sw 0 0\n' "$SWAPFILE" > "$fstab_probe"
+if grep -qE "$fstab_guard_pattern" "$fstab_probe"; then
+  fail 'fstab swap guard matched a commented-out entry'
+fi
+rm -f "$fstab_probe"
+
+# Ports are passed explicitly rather than read from a caller's local array.
+expect_rc 1 ufw_parse_cloudflare_ports '0'
+expect_rc 1 ufw_parse_cloudflare_ports '65536'
+expect_rc 1 ufw_parse_cloudflare_ports 'abc'
+expect_rc 1 ufw_parse_cloudflare_ports ''
+[ "$(ufw_parse_cloudflare_ports ' 80 , 443 ')" = "80 443" ] \
+  || fail 'ufw_parse_cloudflare_ports did not normalize a padded port list'
+
+# backup_path must report failure when the copy fails, because every caller
+# treats a zero return as "a restorable backup now exists".
+backup_probe="$(mktemp -d)"
+(
+  BACKUP_ROOT="$backup_probe/backups"
+  cp() { return 1; }
+  printf 'data\n' > "$backup_probe/source"
+  if backup_path "$backup_probe/source" >/dev/null 2>&1; then
+    exit 1
+  fi
+  exit 0
+) || fail 'backup_path reported success after the backup copy failed'
+rm -rf "$backup_probe"
+
+# Header comment and TOOL_VERSION must agree.
+tool_header_version="$(sed -n 's/^# VPS Init Tool v\([0-9.]*\).*/\1/p' vps_init_tool.sh | head -n1)"
+tool_const_version="$(sed -n 's/^TOOL_VERSION="\([0-9.]*\)".*/\1/p' vps_init_tool.sh | head -n1)"
+[ -n "$tool_header_version" ] || fail 'vps_init_tool.sh header version comment is missing'
+[ "$tool_header_version" = "$tool_const_version" ] \
+  || fail "vps_init_tool.sh header version ($tool_header_version) does not match TOOL_VERSION ($tool_const_version)"
+
+# Every script now lints clean at the default (strictest) severity, so there is
+# no per-file exemption any more. Keep it that way: a new finding is a finding,
+# not a reason to lower the gate.
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck vps_init_tool.sh verify.sh
-  shellcheck -S error freedom.sh xray-1stream-dat.sh
+  shellcheck freedom.sh vps_init_tool.sh xray-1stream-dat.sh verify.sh
 else
-  printf '[WARN] shellcheck not found; skipped shellcheck lint.\n'
+  verify_skip 'shellcheck lint' 'shellcheck is not installed'
 fi
 
 printf '[OK] verification passed\n'

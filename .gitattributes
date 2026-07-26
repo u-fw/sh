@@ -1,0 +1,18 @@
+# Shell scripts must check out with LF endings on every platform: a CRLF
+# checkout breaks the `#!/usr/bin/env bash` shebang on Linux. The repo is
+# currently LF throughout, including verify.ps1 (PowerShell reads LF fine), so
+# normalise everything to LF and keep it that way.
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.ps1   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+
+*.png   binary
+*.jpg   binary
+*.gz    binary
+*.zip   binary
+*.dat   binary

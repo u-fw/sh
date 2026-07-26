@@ -675,7 +675,7 @@ show_result() {
 
   echo
   echo "All generated tags:"
-  ls -1 "$DATADIR" | sort
+  find "$DATADIR" -maxdepth 1 -mindepth 1 -printf '%f\n' 2>/dev/null | sort
 
   echo
   echo "Example Xray routing rule:"

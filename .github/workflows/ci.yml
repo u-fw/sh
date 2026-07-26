@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: shell (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: Syntax check
+        working-directory: network
+        run: |
+          for f in freedom.sh vps_init_tool.sh xray-1stream-dat.sh verify.sh; do
+            bash -n "$f"
+          done
+
+      # Default (strictest) severity, no per-file exemptions. If this trips,
+      # fix the finding rather than lowering the gate.
+      - name: Lint
+        working-directory: network
+        run: shellcheck freedom.sh vps_init_tool.sh xray-1stream-dat.sh verify.sh
+
+      # VERIFY_STRICT turns every "could not check" into a failure, so no part
+      # of the suite can silently skip its way to green in CI.
+      - name: Verification suite
+        working-directory: network
+        env:
+          VERIFY_STRICT: '1'
+        run: bash verify.sh
+
+  powershell:
+    name: powershell (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The PowerShell entry point delegates to verify.sh; VERIFY_STRICT makes
+      # "no bash available" a failure instead of a warning that exits 0.
+      - name: Verification suite (PowerShell entry point)
+        working-directory: network
+        env:
+          VERIFY_STRICT: '1'
+        shell: powershell
+        run: .\verify.ps1

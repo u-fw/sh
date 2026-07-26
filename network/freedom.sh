@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# freedom.sh v10.2-xray
+# freedom.sh v10.3-xray
 # VLESS + REALITY-VISION / XHTTP-TLS-VISION 自动配置脚本
 # - 专精 Xray-core；未安装时可使用 XTLS 官方安装脚本安装
 # - Xray-core: xray x25519 / uuid / vlessenc / mldsa65 / run -test
@@ -14,15 +14,46 @@
 set -Eeuo pipefail
 umask 077
 
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-CYAN='\033[36m'
-NC='\033[0m'
+UI_COLOR_MODE="${FREEDOM_COLOR:-auto}"
+RED=''
+GREEN=''
+YELLOW=''
+CYAN=''
+NC=''
+
+# Colour is opt-out on a real terminal and off everywhere else, so redirected
+# output (logs, CI, `| tee`) stays free of escape sequences.
+ui_init_colors() {
+  local enabled=0
+  case "$UI_COLOR_MODE" in
+    always) enabled=1 ;;
+    never) enabled=0 ;;
+    *)
+      UI_COLOR_MODE="auto"
+      if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+        enabled=1
+      fi
+      ;;
+  esac
+  if [ "$enabled" -eq 1 ]; then
+    RED=$'\033[31m'
+    GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'
+    CYAN=$'\033[36m'
+    NC=$'\033[0m'
+  else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    CYAN=''
+    NC=''
+  fi
+}
+ui_init_colors
 
 export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
-SCRIPT_VERSION="v10.2-xray"
+SCRIPT_VERSION="v10.3-xray"
 DEFAULT_SNI="v1-dy.ixigua.com"
 DEFAULT_PORT="443"
 DEFAULT_NODE_NAME="Premium-Node"
@@ -289,6 +320,8 @@ warn_reality_target_scope() {
 
 clear_screen() {
   [[ "${NONINTERACTIVE:-0}" == "1" ]] && return 0
+  # Without the stdout check this writes the clear sequence into a pipe or log.
+  [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] || return 0
   clear 2>/dev/null || true
 }
 
@@ -427,7 +460,10 @@ secure_config_permissions() {
 
 restore_backup() {
   [[ -n "${BACKUP_FILE:-}" && -f "$BACKUP_FILE" ]] || return 1
-  cp -a "$BACKUP_FILE" "$CONFIG_PATH"
+  # Callers invoke this in `||` context, which disables errexit for the whole
+  # body, so the copy must be checked explicitly or a failed restore would be
+  # reported as a successful one.
+  cp -a "$BACKUP_FILE" "$CONFIG_PATH" || return 1
   secure_config_permissions
   ok "已恢复备份配置：$BACKUP_FILE -> $CONFIG_PATH"
 
@@ -1116,9 +1152,9 @@ check_port_available_or_handle() {
 }
 
 download_and_run_installer() {
-  local url="$1" shell_bin="$2" label="$3" installer rc
+  local url="$1" shell_bin="$2" label="$3" installer rc=0
   installer="$(mktemp)"
-  if ! curl -fsSL "$url" -o "$installer"; then
+  if ! curl -fsSL --connect-timeout 10 --max-time 300 --retry 2 "$url" -o "$installer"; then
     rm -f "$installer"
     fatal "${label} 安装脚本下载失败：$url"
   fi
@@ -1126,11 +1162,9 @@ download_and_run_installer() {
     rm -f "$installer"
     fatal "${label} 安装脚本权限设置失败"
   fi
-  if "$shell_bin" "$installer" "${@:4}"; then
-    rm -f "$installer"
-    return 0
-  fi
-  rc=$?
+  # Capture the installer status directly; $? after a failed `if` block is the
+  # status of the `if` compound (0), not of the command that failed.
+  "$shell_bin" "$installer" "${@:4}" || rc=$?
   rm -f "$installer"
   return "$rc"
 }
@@ -1187,9 +1221,11 @@ ensure_xray_capabilities() {
   if [[ "${NONINTERACTIVE:-0}" == "1" ]] && ! is_auto_yes; then
     fatal "Rerun with --update-xray (or --yes) to upgrade through the official XTLS installer."
   fi
-  confirm_yes_default_yes "是否使用 XTLS 官方安装脚本升级 Xray-core？" \
-    && install_xray_official \
-    || fatal "Xray capability upgrade was cancelled."
+  if confirm_yes_default_yes "是否使用 XTLS 官方安装脚本升级 Xray-core？"; then
+    install_xray_official
+  else
+    fatal "Xray capability upgrade was cancelled."
+  fi
   BIN="$(command -v xray)"
   missing="$(xray_missing_required_capabilities)"
   [[ -z "$missing" ]] || fatal "Xray still lacks required capabilities after upgrade: $(printf '%s' "$missing" | paste -sd, -)"
@@ -1201,9 +1237,11 @@ ensure_xray_installed() {
   if ! command -v xray >/dev/null 2>&1; then
     was_installed=0
     warn "未找到 xray。"
-    confirm_yes_default_yes "是否使用 XTLS 官方脚本安装 Xray-core？" \
-      && install_xray_official \
-      || fatal "已取消安装，退出。"
+    if confirm_yes_default_yes "是否使用 XTLS 官方脚本安装 Xray-core？"; then
+      install_xray_official
+    else
+      fatal "已取消安装，退出。"
+    fi
   elif flag_enabled "$UPDATE_XRAY"; then
     install_xray_official
   fi
@@ -1551,6 +1589,7 @@ gen_reality_keys_xray() {
 }
 
 gen_xray_vless_encryption() {
+  local enc_choice=""
   echo
   echo "Xray VLESS Encryption："
   echo "1) X25519 认证，由 xray vlessenc 生成（默认，链接较短）"
@@ -1563,8 +1602,12 @@ gen_xray_vless_encryption() {
       none|off|no|NO|false|FALSE) enc_choice="3" ;;
       *) fatal "Xray 加密参数无效：$XRAY_ENCRYPTION_CHOICE" ;;
     esac
+  elif [ ! -t 0 ]; then
+    # Interactive mode but stdin is not a terminal (curl | bash, ssh without
+    # -t): fall back to the default instead of dying on read's EOF under -e.
+    enc_choice="1"
   else
-    read -r -p "选择加密 [默认 1]: " enc_choice
+    read -r -p "选择加密 [默认 1]: " enc_choice || enc_choice=""
     enc_choice="${enc_choice:-1}"
   fi
 
@@ -2073,7 +2116,10 @@ Usage:
   bash freedom.sh [options]
 
 Without options, runs the original interactive deployment flow.
-With any deployment option, runs non-interactively using defaults for omitted values.
+Passing any option that carries a deployment setting (--port, --sni, --mode, ...)
+or --non-interactive runs unattended, using defaults for omitted values and
+skipping QR output. Plain toggles such as --no-qr, --yes or --skip-sni-check do
+not by themselves switch the script out of interactive mode.
 
 Options:
   --port PORT                     Listen port. Default: ${DEFAULT_PORT}.
@@ -2101,7 +2147,9 @@ Options:
                                   Explicitly allow REALITY to listen on a port other than TCP/443.
   --update-xray                   Update Xray through the official XTLS installer before deployment.
   --check, --preflight            Run read-only preflight checks and exit.
-  --yes, -y                       Auto-confirm installer prompts.
+  --non-interactive               Run unattended with defaults for omitted values.
+  --yes, -y                       Auto-confirm prompts, including installer, capability
+                                  upgrade and rollback confirmations.
   --no-qr                         Skip QR output.
   --version                       Print version.
   --help, -h                      Show this help.
@@ -2128,13 +2176,31 @@ Environment:
   FREEDOM_UPDATE_XRAY=0|1
   FREEDOM_YES=1
   FREEDOM_NO_QR=1
+  FREEDOM_COLOR=auto|always|never   # honours NO_COLOR and non-TTY stdout
 EOF2
 }
 
 handle_cli() {
   [ "$#" -eq 0 ] && return 0
-  NONINTERACTIVE=1
-  NO_QR=1
+  local arg
+
+  # Only options that actually carry deployment settings imply unattended
+  # operation. Pure toggles such as --no-qr, --skip-sni-check or --yes must not
+  # silently turn an interactive invocation into a complete unattended
+  # deployment onto the default SNI and port. Values can never be mistaken for
+  # options here because require_option_value rejects values starting with "-".
+  for arg in "$@"; do
+    case "$arg" in
+      --non-interactive|--port|--sni|--node-name|--server|--mode|--cdn-xhttp-tls|\
+      --xhttp-path|--xhttp-alpn|--xhttp-profile|--tls-cert-file|--tls-key-file|\
+      --tls-cert-mode|--route-profile|--xray-encryption)
+        NONINTERACTIVE=1
+        ;;
+    esac
+  done
+  if [[ "${NONINTERACTIVE:-0}" == "1" ]]; then
+    NO_QR=1
+  fi
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2232,6 +2298,9 @@ handle_cli() {
       --check|--preflight)
         CHECK_ONLY=1
         ;;
+      --non-interactive)
+        NONINTERACTIVE=1
+        ;;
       --yes|-y)
         ASSUME_YES=1
         ;;
@@ -2271,5 +2340,11 @@ main() {
   print_result "$(build_link)"
 }
 
-handle_cli "$@"
-main "$@"
+# Allow the test suite (and anything else) to source this file for its helper
+# functions without running a deployment. Mirrors VPS_INIT_LIB_ONLY in
+# vps_init_tool.sh, and replaces the previous approach of text-stripping the
+# entry point, which silently executed the whole script if these lines moved.
+if [ "${FREEDOM_LIB_ONLY:-0}" != "1" ]; then
+  handle_cli "$@"
+  main "$@"
+fi
