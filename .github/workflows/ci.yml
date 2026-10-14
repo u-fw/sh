@@ -46,6 +46,7 @@ jobs:
         env:
           VERIFY_STRICT: '1'
         run: bash verify.sh
+    timeout-minutes: 15
 
   powershell:
     name: powershell (windows)
@@ -61,3 +62,7 @@ jobs:
           VERIFY_STRICT: '1'
         shell: powershell
         run: .\verify.ps1
+    timeout-minutes: 15
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
