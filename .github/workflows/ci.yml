@@ -49,20 +49,37 @@ jobs:
     timeout-minutes: 15
 
   powershell:
-    name: powershell (windows)
+    name: powershell static (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The PowerShell entry point delegates to verify.sh; VERIFY_STRICT makes
-      # "no bash available" a failure instead of a warning that exits 0.
-      - name: Verification suite (PowerShell entry point)
+      # NTFS cannot validate POSIX permission bits. Runtime gates stay strict
+      # in the Linux jobs; Windows executes the native static assertions.
+      - name: PowerShell static assertions
         working-directory: network
         env:
           VERIFY_STRICT: '1'
         shell: powershell
-        run: .\verify.ps1
+        run: .\verify.ps1 -StaticOnly
     timeout-minutes: 15
+
+  powershell-runtime:
+    name: powershell entry point (linux runtime)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq
+      - name: Strict PowerShell entry point
+        working-directory: network
+        env:
+          VERIFY_STRICT: '1'
+        shell: pwsh
+        run: ./verify.ps1
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

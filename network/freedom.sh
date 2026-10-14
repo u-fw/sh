@@ -279,8 +279,10 @@ normalize_tls_cert_mode() {
 }
 
 cert_covers_domain() {
-  local cert_file="$1" domain="$2"
-  openssl x509 -in "$cert_file" -noout -checkhost "$domain" >/dev/null 2>&1
+  local cert_file="$1" domain="$2" result
+  # x509 -checkhost also exits zero on a hostname mismatch. Check its verdict.
+  result="$(openssl x509 -in "$cert_file" -noout -checkhost "$domain" 2>/dev/null)" || return 1
+  [[ "$result" == "Hostname $domain does match certificate" ]]
 }
 
 check_tls_cert_files() {
@@ -948,7 +950,7 @@ url_encode() {
 
 url_host() {
   local h="$1"
-  if [[ "$h" == *:* && "$h" != \[*\] ]]; then
+  if [[ "$h" == *:* && "$h" != '['*']' ]]; then
     echo "[$h]"
   else
     echo "$h"

@@ -1,3 +1,5 @@
+param([switch]$StaticOnly)
+
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$Message) {
@@ -523,6 +525,11 @@ Check-NotContains 'freedom.sh' 'bash -c "\$\(curl' 'freedom.sh must not execute 
 Check-NotContains 'freedom.sh' 'xargs -r rm -f' 'freedom.sh backup cleanup must not use ls/xargs deletion'
 Check-NotContains 'freedom.sh' 'systemctl enable xray >/dev/null 2>&1 \|\| true' 'freedom.sh must not hide Xray enable failures after installation'
 Check-Contains 'freedom.sh' 'systemctl enable xray >/dev/null 2>&1 \|\| fatal "Xray service enable failed"' 'freedom.sh must fail clearly when Xray service enable fails'
+
+if ($StaticOnly) {
+  Write-Host '[OK] PowerShell static assertions passed; full runtime checks run separately on Linux.'
+  exit 0
+}
 
 $bashVerified = $false
 $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
